@@ -66,7 +66,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
   @staticmethod
   def _decode_resource(resource_pb):
-    return {resource_pb.name: HTTPProxyScheduler._decode_typed_field(resource_pb)}
+    return (resource_pb.name, HTTPProxyScheduler._decode_typed_field(resource_pb))
 
   def resourceOffers(self, driver, offers):
     """
@@ -93,8 +93,8 @@ class HTTPProxyScheduler(mesos.Scheduler):
         "framework_id": offer.framework_id.value,
         "hostname": offer.hostname,
         "id": offer.id.value,
-        "resources": [HTTPProxyScheduler._decode_resource(r) for r in offer.resources],
-        "slave_id": offer.slave_id.value
+        "resources": {name: value for (name, value) in [HTTPProxyScheduler._decode_resource(r) for r in offer.resources]},
+        "slave_id": offer.slave_id.value,
       }
 
       logging.debug("Offer: " + json.dumps(raw_info, sort_keys=True, indent=2, separators=(',', ': ')))
