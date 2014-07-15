@@ -8,6 +8,7 @@ import sys
 import time
 import json
 from pprint import pprint
+import uuid
 
 import mesos
 import mesos_pb2
@@ -15,11 +16,9 @@ import mesos_pb2
 class HTTPProxyScheduler(mesos.Scheduler):
   def __init__(self, executor):
     self.executor = executor
-    self.taskData = {}
+    # self.taskData = {}
     self.tasksLaunched = 0
     self.tasksFinished = 0
-    self.messagesSent = 0
-    self.messagesReceived = 0
 
   def registered(self, driver, frameworkId, masterInfo):
     """
@@ -64,8 +63,20 @@ class HTTPProxyScheduler(mesos.Scheduler):
     logging.info("Got %d resource offers" % len(offers))
 
     for offer in offers:
-      info = {
-        "attributes": [a for a in offer.attributes],
+      # protobuf -> dict
+      raw_info = {
+        "attributes": [{
+          "name": a.name,
+          "ranges": [
+            {
+              "begin": ra.begin,
+              "end": ra.end
+            } for ra in a.ranges.range],
+          "scalar": a.scalar.value,
+          "set": [s for s in a.set.item],
+          "text": a.text,
+          "type": a.type,
+        } for a in offer.attributes],
         "executor_ids": [ei.value for ei in offer.executor_ids],
         "framework_id": offer.framework_id.value,
         "hostname": offer.hostname,
@@ -73,7 +84,11 @@ class HTTPProxyScheduler(mesos.Scheduler):
         "resources": [
           {
             "name": r.name,
-            "ranges": [{"begin": ra.begin, "end": ra.end} for ra in r.ranges.range],
+            "ranges": [
+              {
+                "begin": ra.begin,
+                "end": ra.end
+              } for ra in r.ranges.range],
             "role": r.role,
             "scalar": r.scalar.value,
             "set": [s for s in r.set.item],
@@ -82,35 +97,44 @@ class HTTPProxyScheduler(mesos.Scheduler):
         "slave_id": offer.slave_id.value
       }
 
-      logging.debug(json.dumps(info, sort_keys=True))
-      # print(json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
+      logging.debug("Offer: " + json.dumps(raw_info, sort_keys=True, indent=2, separators=(',', ': ')))
+
+      # TODO: get resp by hitting our HTTP endpoint, this is a 'mock'
+      tasks_to_run = [
+        {
+          "id": str(uuid.uuid4()),
+          "resources": {
+            "cpus": 0.25,
+            "mem": 64
+          }
+        }
+      ]
 
       tasks = []
-      if True: # TODO...
-        tid = self.tasksLaunched
+      for task_to_run in tasks_to_run:
+        tid = task_to_run["id"]
         self.tasksLaunched += 1
 
-        logging.info("Accepting offer on %s to start task %d" % (offer.hostname, tid))
+        logging.info("Accepting offer on %s to start task %s" % (offer.hostname, tid))
 
         task = mesos_pb2.TaskInfo()
         task.task_id.value = str(tid)
         task.slave_id.value = offer.slave_id.value
-        task.name = "task %d" % tid
+        task.name = "task %s" % tid
         task.executor.MergeFrom(self.executor)
 
         cpus = task.resources.add()
         cpus.name = "cpus"
         cpus.type = mesos_pb2.Value.SCALAR
-        cpus.scalar.value = 1 # TODO
+        cpus.scalar.value = task_to_run["resources"]["cpus"]
 
         mem = task.resources.add()
         mem.name = "mem"
         mem.type = mesos_pb2.Value.SCALAR
-        mem.scalar.value = 512 # TODO
+        mem.scalar.value = task_to_run["resources"]["mem"]
 
         tasks.append(task)
-        self.taskData[task.task_id.value] = (
-          offer.slave_id, task.executor.executor_id)
+        # self.taskData[task.task_id.value] = (offer.slave_id, task.executor.executor_id)
       driver.launchTasks(offer.id, tasks)
 
   def offerRescinded(self, driver, offerId):
@@ -135,6 +159,8 @@ class HTTPProxyScheduler(mesos.Scheduler):
       currently not true if the slave sending the status update is lost or
       fails during that time.
     """
+
+    # TODO: handle each of these
     # TASK_STAGING = 6;  // Initial state. Framework status updates should not use.
     # TASK_STARTING = 0;
     # TASK_RUNNING = 1;
@@ -145,21 +171,15 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
     logging.info("Task %s is in state %d" % (update.task_id.value, update.state))
 
-    # Ensure the binary data came through.
-    if update.data != "data with a \0 byte":
-      logging.error("The update data did not match! Expected: 'data with a \\x00 byte' Actual: %s" %  repr(str(update.data)))
-      sys.exit(1)
-
     if update.state == mesos_pb2.TASK_FINISHED:
       self.tasksFinished += 1
 
-      slave_id, executor_id = self.taskData[update.task_id.value]
+      # slave_id, executor_id = self.taskData[update.task_id.value]
 
-      self.messagesSent += 1
-      driver.sendFrameworkMessage(
-        executor_id,
-        slave_id,
-        'data with a \0 byte')
+      # driver.sendFrameworkMessage(
+      #   executor_id,
+      #   slave_id,
+      #   "Task %s finished" % update.task_id.value)
 
   def frameworkMessage(self, driver, executorId, slaveId, message):
     """
@@ -167,12 +187,6 @@ class HTTPProxyScheduler(mesos.Scheduler):
       effort; do not expect a framework message to be retransmitted in any
       reliable fashion.
     """
-    self.messagesReceived += 1
-
-    # The message bounced back as expected.
-    if message != "data with a \0 byte":
-      logging.error("The returned message data did not match! Expected: 'data with a \\x00 byte' Actual: %s" % repr(str(message)))
-      sys.exit(1)
     logging.info("Received message: %s" % repr(str(message)))
 
   def slaveLost(self, driver, slaveId):
@@ -201,9 +215,10 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
 if __name__ == "__main__":
   if len(sys.argv) != 2:
-    print("Usage: %s master" % sys.argv[0])
+    print("Usage: %s master_host:master_port" % sys.argv[0])
     sys.exit(1)
 
+  # TODO: take this on cmdline
   logging.basicConfig(level=logging.DEBUG)
 
   executor = mesos_pb2.ExecutorInfo()

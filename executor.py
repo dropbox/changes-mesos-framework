@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import logging
+import subprocess
 import sys
 import threading
 import time
@@ -45,18 +46,18 @@ class HTTPProxyExecutor(mesos.Executor):
       update = mesos_pb2.TaskStatus()
       update.task_id.value = task.task_id.value
       update.state = mesos_pb2.TASK_RUNNING
-      update.data = 'data with a \0 byte'
+      update.data = ''
       driver.sendStatusUpdate(update)
 
       # This is where one would perform the requested task.
+      status = subprocess.call(["/bin/sleep", "30"])
 
-      logging.info("Sending status update...")
+      logging.info("Task %s finished" % task.task_id.value)
       update = mesos_pb2.TaskStatus()
       update.task_id.value = task.task_id.value
       update.state = mesos_pb2.TASK_FINISHED
-      update.data = 'data with a \0 byte'
+      update.data = ''
       driver.sendStatusUpdate(update)
-      logging.info("Sent status update")
 
     thread = threading.Thread(target=run_task)
     thread.start()
