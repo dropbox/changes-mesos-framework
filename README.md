@@ -10,7 +10,13 @@ vagrant ssh
 sudo easy_install http://downloads.mesosphere.io/master/ubuntu/14.04/mesos-0.19.0_rc2-py2.7-linux-x86_64.egg
 ```
 
-This proxy will periodically POST something like this to the `/offer` endpoint of your service:
+Example run:
+
+```shell
+./scheduler.py 127.0.1.1:5050 # mesos master host:ip
+```
+
+This proxy will periodically `POST` a payload like this to the `/offer` endpoint of your service:
 
 ```json
 {
@@ -36,7 +42,7 @@ This proxy will periodically POST something like this to the `/offer` endpoint o
 }
 ```
 
-Your server should respond like:
+You will likely only care about the `resources` and `attributes` (if you set any in Mesos) keys. Your server should respond with a payload like:
 
 ```json
 []
@@ -56,9 +62,9 @@ Your server should respond like:
 ]
 ```
 
-...to run `my_job`, claiming that amount of resources.
+...to run `my_job`, claiming the stated amount of resources.
 
-The proxy will also periodically send status updates about jobs to the `/status` endpoint of your service:
+The proxy will also periodically `POST` status updates about job to the `/status` endpoint of your service:
 
 ```json
 {
