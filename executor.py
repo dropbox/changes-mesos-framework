@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import logging
 import sys
 import threading
 import time
@@ -8,23 +9,26 @@ import mesos
 import mesos_pb2
 
 class HTTPProxyExecutor(mesos.Executor):
-    def registered(self, driver, executorInfo, frameworkInfo, slaveInfo):
+  def registered(self, driver, executorInfo, frameworkInfo, slaveInfo):
     """
       Invoked once the executor driver has been able to successfully connect
       with Mesos.  In particular, a scheduler can pass some data to its
       executors through the FrameworkInfo.ExecutorInfo's data field.
     """
+    logging.warn("Registered with executor ID %s" % executorInfo.executor_id)
 
   def reregistered(self, driver, slaveInfo):
     """
       Invoked when the executor re-registers with a restarted slave.
     """
+    logging.warn("Registered with new slave")
 
   def disconnected(self, driver):
     """
       Invoked when the executor becomes "disconnected" from the slave (e.g.,
       the slave is being restarted due to an upgrade).
     """
+    logging.warn("Disconnected from slave")
 
   def launchTask(self, driver, task):
     """
@@ -37,7 +41,7 @@ class HTTPProxyExecutor(mesos.Executor):
     # Create a thread to run the task. Tasks should always be run in new
     # threads or processes, rather than inside launchTask itself.
     def run_task():
-      print "Running task %s" % task.task_id.value
+      logging.info("Running task %s" % task.task_id.value)
       update = mesos_pb2.TaskStatus()
       update.task_id.value = task.task_id.value
       update.state = mesos_pb2.TASK_RUNNING
@@ -46,13 +50,13 @@ class HTTPProxyExecutor(mesos.Executor):
 
       # This is where one would perform the requested task.
 
-      print "Sending status update..."
+      logging.info("Sending status update...")
       update = mesos_pb2.TaskStatus()
       update.task_id.value = task.task_id.value
       update.state = mesos_pb2.TASK_FINISHED
       update.data = 'data with a \0 byte'
       driver.sendStatusUpdate(update)
-      print "Sent status update"
+      logging.info("Sent status update")
 
     thread = threading.Thread(target=run_task)
     thread.start()
@@ -65,6 +69,7 @@ class HTTPProxyExecutor(mesos.Executor):
       TaskStatus (i.e., with TASK_KILLED) and invoking ExecutorDriver's
       sendStatusUpdate.
     """
+    logging.warn("Kill task called on: %s" % taskId.value)
 
   def frameworkMessage(self, driver, message):
     """
@@ -83,6 +88,7 @@ class HTTPProxyExecutor(mesos.Executor):
       status updates for (e.g., TASK_KILLED, TASK_FINISHED, TASK_FAILED,
       etc) a TASK_LOST status update will be created.
     """
+    logging.warn("Shutdown called")
 
   def error(self, driver, message):
     """
@@ -90,9 +96,11 @@ class HTTPProxyExecutor(mesos.Executor):
       executor driver.  The driver will be aborted BEFORE invoking this
       callback.
     """
-    print("Error from Mesos: %s" % message, file=sys.stderr)
+    logging.error("Error from Mesos: %s" % message)
+
 
 if __name__ == "__main__":
-  print "Starting executor"
+  logging.basicConfig(level=logging.DEBUG)
+
   driver = mesos.MesosExecutorDriver(HTTPProxyExecutor())
   sys.exit(0 if driver.run() == mesos_pb2.DRIVER_STOPPED else 1)

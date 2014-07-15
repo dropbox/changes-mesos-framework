@@ -2,6 +2,7 @@
 
 from __future__ import print_function
 
+import logging
 import os
 import sys
 import time
@@ -10,11 +11,6 @@ from pprint import pprint
 
 import mesos
 import mesos_pb2
-
-TOTAL_TASKS = 5
-
-TASK_CPUS = 1
-TASK_MEM = 32
 
 class HTTPProxyScheduler(mesos.Scheduler):
   def __init__(self, executor):
@@ -32,7 +28,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
       master, and the masterInfo which is information about the master
       itself.
     """
-    print "Registered with framework ID %s" % frameworkId.value
+    logging.warn("Registered with framework ID %s" % frameworkId.value)
 
   def reregistered(self, driver, masterInfo):
     """
@@ -41,14 +37,14 @@ class HTTPProxyScheduler(mesos.Scheduler):
       registered.  masterInfo contains information about the newly elected
       master.
     """
-    print "Re-Registered with new master"
+    logging.warn("Re-Registered with new master")
 
   def disconnected(self, driver):
     """
       Invoked when the scheduler becomes disconnected from the master, e.g.
       the master fails and another is taking over.
     """
-    print "Disconnected from master"
+    logging.warn("Disconnected from master")
 
   def resourceOffers(self, driver, offers):
     """
@@ -65,7 +61,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
       framework has already launched tasks with those resources then those
       tasks will fail with a TASK_LOST status and a message saying as much).
     """
-    print "Got %d resource offers" % len(offers)
+    logging.info("Got %d resource offers" % len(offers))
 
     for offer in offers:
       info = {
@@ -86,16 +82,15 @@ class HTTPProxyScheduler(mesos.Scheduler):
         "slave_id": offer.slave_id.value
       }
 
+      logging.debug(json.dumps(info, sort_keys=True))
       # print(json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
 
       tasks = []
-      print "Got resource offer %s" % offer.id.value
-      if self.tasksLaunched < TOTAL_TASKS:
+      if True: # TODO...
         tid = self.tasksLaunched
         self.tasksLaunched += 1
 
-        print "Accepting offer on %s to start task %d" \
-            % (offer.hostname, tid)
+        logging.info("Accepting offer on %s to start task %d" % (offer.hostname, tid))
 
         task = mesos_pb2.TaskInfo()
         task.task_id.value = str(tid)
@@ -106,12 +101,12 @@ class HTTPProxyScheduler(mesos.Scheduler):
         cpus = task.resources.add()
         cpus.name = "cpus"
         cpus.type = mesos_pb2.Value.SCALAR
-        cpus.scalar.value = TASK_CPUS
+        cpus.scalar.value = 1 # TODO
 
         mem = task.resources.add()
         mem.name = "mem"
         mem.type = mesos_pb2.Value.SCALAR
-        mem.scalar.value = TASK_MEM
+        mem.scalar.value = 512 # TODO
 
         tasks.append(task)
         self.taskData[task.task_id.value] = (
@@ -127,9 +122,9 @@ class HTTPProxyScheduler(mesos.Scheduler):
       invalid offer will receive TASK_LOST status updats for those tasks
       (see Scheduler.resourceOffers).
     """
-    print "Offer rescinded: %s" % offerId.value
+    logging.info("Offer rescinded: %s" % offerId.value)
 
-  def statusUpdate(self, driver, status):
+  def statusUpdate(self, driver, update):
     """
       Invoked when the status of a task has changed (e.g., a slave is lost
       and so the task is lost, a task finishes and an executor sends a
@@ -148,19 +143,15 @@ class HTTPProxyScheduler(mesos.Scheduler):
     # TASK_KILLED = 4;   // TERMINAL.
     # TASK_LOST = 5;     // TERMINAL.
 
-    print "Task %s is in state %d" % (update.task_id.value, update.state)
+    logging.info("Task %s is in state %d" % (update.task_id.value, update.state))
 
     # Ensure the binary data came through.
     if update.data != "data with a \0 byte":
-      print "The update data did not match!"
-      print "  Expected: 'data with a \\x00 byte'"
-      print "  Actual:  ", repr(str(update.data))
+      logging.error("The update data did not match! Expected: 'data with a \\x00 byte' Actual: %s" %  repr(str(update.data)))
       sys.exit(1)
 
     if update.state == mesos_pb2.TASK_FINISHED:
       self.tasksFinished += 1
-      if self.tasksFinished == TOTAL_TASKS:
-        print "All tasks done, waiting for final framework message"
 
       slave_id, executor_id = self.taskData[update.task_id.value]
 
@@ -180,19 +171,9 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
     # The message bounced back as expected.
     if message != "data with a \0 byte":
-      print "The returned message data did not match!"
-      print "  Expected: 'data with a \\x00 byte'"
-      print "  Actual:  ", repr(str(message))
+      logging.error("The returned message data did not match! Expected: 'data with a \\x00 byte' Actual: %s" % repr(str(message)))
       sys.exit(1)
-    print "Received message:", repr(str(message))
-
-    if self.messagesReceived == TOTAL_TASKS:
-      if self.messagesReceived != self.messagesSent:
-        print "Sent", self.messagesSent,
-        print "but received", self.messagesReceived
-        sys.exit(1)
-      print "All tasks done, and all messages received, exiting"
-      driver.stop()
+    logging.info("Received message: %s" % repr(str(message)))
 
   def slaveLost(self, driver, slaveId):
     """
@@ -200,14 +181,14 @@ class HTTPProxyScheduler(mesos.Scheduler):
       failure, network partition.) Most frameworks will need to reschedule
       any tasks launched on this slave on a new slave.
     """
-    print "Slave lost: %s" % slaveId.value
+    logging.warn("Slave lost: %s" % slaveId.value)
 
   def executorLost(self, driver, executorId, slaveId, status):
     """
       Invoked when an executor has exited/terminated. Note that any tasks
       running will have TASK_LOST status updates automatically generated.
     """
-    print "Executor %s lost on slave %s" % (exeuctorId.value, slaveId.value)
+    logging.warn("Executor %s lost on slave %s" % (exeuctorId.value, slaveId.value))
 
   def error(self, driver, message):
     """
@@ -215,59 +196,31 @@ class HTTPProxyScheduler(mesos.Scheduler):
       scheduler driver.  The driver will be aborted BEFORE invoking this
       callback.
     """
-    print("Error from Mesos: %s " % message, file=sys.stderr)
+    logging.error("Error from Mesos: %s" % message)
 
 
 if __name__ == "__main__":
   if len(sys.argv) != 2:
-    print "Usage: %s master" % sys.argv[0]
+    print("Usage: %s master" % sys.argv[0])
     sys.exit(1)
+
+  logging.basicConfig(level=logging.DEBUG)
 
   executor = mesos_pb2.ExecutorInfo()
   executor.executor_id.value = "default"
   executor.command.value = os.path.abspath("./executor.py")
   executor.name = "HTTP Proxy Executor"
-  executor.source = "python_test"
+  executor.source = "http_proxy"
 
   framework = mesos_pb2.FrameworkInfo()
   framework.user = "" # Have Mesos fill in the current user.
   framework.name = "HTTP Proxy Framework"
+  framework.principal = "http-proxy"
 
-  # TODO(vinod): Make checkpointing the default when it is default
-  # on the slave.
-  if os.getenv("MESOS_CHECKPOINT"):
-    print "Enabling checkpoint for the framework"
-    framework.checkpoint = True
-
-  if os.getenv("MESOS_AUTHENTICATE"):
-    print "Enabling authentication for the framework"
-
-    if not os.getenv("DEFAULT_PRINCIPAL"):
-      print "Expecting authentication principal in the environment"
-      sys.exit(1);
-
-    if not os.getenv("DEFAULT_SECRET"):
-      print "Expecting authentication secret in the environment"
-      sys.exit(1);
-
-    credential = mesos_pb2.Credential()
-    credential.principal = os.getenv("DEFAULT_PRINCIPAL")
-    credential.secret = os.getenv("DEFAULT_SECRET")
-
-    framework.principal = os.getenv("DEFAULT_PRINCIPAL")
-
-    driver = mesos.MesosSchedulerDriver(
-      HTTPProxyScheduler(executor),
-      framework,
-      sys.argv[1],
-      credential)
-  else:
-    framework.principal = "test-framework-python"
-
-    driver = mesos.MesosSchedulerDriver(
-      HTTPProxyScheduler(executor),
-      framework,
-      sys.argv[1])
+  driver = mesos.MesosSchedulerDriver(
+    HTTPProxyScheduler(executor),
+    framework,
+    sys.argv[1])
 
   status = 0 if driver.run() == mesos_pb2.DRIVER_STOPPED else 1
 
