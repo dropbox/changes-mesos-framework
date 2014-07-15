@@ -34,7 +34,7 @@ def offer():
     tasks_to_run.append(
       {
         "id": "my_job_" + str(random.randint(0, 1000)),
-        "cmd": "pwd && /bin/sleep 300",
+        "cmd": "pwd && /bin/sleep " + str(random.randint(10, 60)),
         "resources": {
           "cpus": REQUIRED_CPU,
           "mem": REQUIRED_MEM

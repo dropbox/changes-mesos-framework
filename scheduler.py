@@ -119,8 +119,10 @@ class HTTPProxyScheduler(mesos.Scheduler):
         task.name = "task %s" % tid
         task.task_id.value = str(tid)
         task.slave_id.value = offer.slave_id.value
-        # task.executor.MergeFrom(self.executor)
+
         task.command.value = task_to_run["cmd"]
+        # task.executor.MergeFrom(self.executor)
+        # task.executor.data = task_to_run["cmd"].encode("utf-8")
 
         cpus = task.resources.add()
         cpus.name = "cpus"
