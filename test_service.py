@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+from __future__ import print_function
+
 import json
 from pprint import pprint
 
@@ -15,6 +17,9 @@ def index():
 
 @app.route("/offer", methods = ['POST'])
 def offer():
+  print("Received resource offer:")
+  print(json.dumps(request.get_json(), sort_keys=True, indent=2, separators=(',', ': ')))
+
   REQUIRED_MEM = 800
   REQUIRED_CPU = 0.5
 
@@ -36,7 +41,17 @@ def offer():
       }
     )
 
+  print("Responding with the following tasks:")
+  print(json.dumps(tasks_to_run, sort_keys=True, indent=2, separators=(',', ': ')))
   return Response(json.dumps(tasks_to_run),  mimetype='application/json')
+
+
+@app.route("/status", methods = ['POST'])
+def status():
+  print("Received status update:")
+  print(json.dumps(request.get_json(), sort_keys=True, indent=2, separators=(',', ': ')))
+  return "OK"
+
 
 if __name__ == "__main__":
   app.debug = True

@@ -159,16 +159,25 @@ class HTTPProxyScheduler(mesos.Scheduler):
       fails during that time.
     """
 
-    # TODO: handle each of these
-    # TASK_STAGING = 6;  // Initial state. Framework status updates should not use.
-    # TASK_STARTING = 0;
-    # TASK_RUNNING = 1;
-    # TASK_FINISHED = 2; // TERMINAL.
-    # TASK_FAILED = 3;   // TERMINAL.
-    # TASK_KILLED = 4;   // TERMINAL.
-    # TASK_LOST = 5;     // TERMINAL.
+    states = {
+      0: "starting",
+      1: "running",
+      2: "finished", # terminal
+      3: "failed", # terminal
+      4: "killed", # terminal
+      5: "lost", # terminal
+      6: "staging",
+    }
 
     logging.info("Task %s is in state %d" % (update.task_id.value, update.state))
+
+    status_update = {
+      "id": update.task_id.value,
+      "state": states[update.state]
+    }
+    resp = requests.post(self.service + "status",
+                         data=json.dumps(status_update),
+                         headers={'content-type': 'application/json'})
 
     if update.state == mesos_pb2.TASK_FINISHED:
       self.tasksFinished += 1

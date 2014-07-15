@@ -57,3 +57,9 @@ Your server should respond like:
 ```
 
 ...to run `my_job`, claiming that amount of resources.
+
+The proxy will also periodically send status updates about jobs to the `/status` endpoint of your service:
+
+```json
+
+```
