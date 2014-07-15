@@ -12,11 +12,13 @@ import uuid
 
 import mesos
 import mesos_pb2
+import requests
 
 
 class HTTPProxyScheduler(mesos.Scheduler):
-  def __init__(self, executor):
+  def __init__(self, executor, service):
     self.executor = executor
+    self.service = service
     # self.taskData = {}
     self.tasksLaunched = 0
     self.tasksFinished = 0
@@ -87,7 +89,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
     for offer in offers:
       # protobuf -> dict
-      raw_info = {
+      info = {
         "attributes": [HTTPProxyScheduler._decode_attribute(a) for a in offer.attributes],
         "executor_ids": [ei.value for ei in offer.executor_ids],
         "framework_id": offer.framework_id.value,
@@ -97,18 +99,12 @@ class HTTPProxyScheduler(mesos.Scheduler):
         "slave_id": offer.slave_id.value,
       }
 
-      logging.debug("Offer: " + json.dumps(raw_info, sort_keys=True, indent=2, separators=(',', ': ')))
+      logging.debug("Offer: " + json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
 
-      # TODO: get resp by hitting our HTTP endpoint, this is a 'mock'
-      tasks_to_run = [
-        {
-          "id": str(uuid.uuid4()),
-          "resources": {
-            "cpus": 0.25,
-            "mem": 64
-          }
-        }
-      ]
+      resp = requests.post(self.service + "offer",
+                           data=json.dumps(info),
+                           headers={'content-type': 'application/json'})
+      tasks_to_run = resp.json()
 
       tasks = []
       for task_to_run in tasks_to_run:
@@ -218,8 +214,11 @@ if __name__ == "__main__":
     print("Usage: %s master_host:master_port" % sys.argv[0])
     sys.exit(1)
 
-  # TODO: take this on cmdline
-  logging.basicConfig(level=logging.DEBUG)
+  # TODO: take these on cmdline
+  log_level = "DEBUG"
+  service = "http://localhost:5000/"
+
+  logging.basicConfig(level=getattr(logging, log_level.upper()))
 
   executor = mesos_pb2.ExecutorInfo()
   executor.executor_id.value = "default"
@@ -233,7 +232,7 @@ if __name__ == "__main__":
   framework.principal = "http-proxy"
 
   driver = mesos.MesosSchedulerDriver(
-    HTTPProxyScheduler(executor),
+    HTTPProxyScheduler(executor, service),
     framework,
     sys.argv[1])
 
