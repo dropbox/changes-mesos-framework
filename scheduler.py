@@ -13,6 +13,7 @@ import uuid
 import mesos
 import mesos_pb2
 
+
 class HTTPProxyScheduler(mesos.Scheduler):
   def __init__(self, executor):
     self.executor = executor
@@ -45,6 +46,28 @@ class HTTPProxyScheduler(mesos.Scheduler):
     """
     logging.warn("Disconnected from master")
 
+  @staticmethod
+  def _decode_typed_field(pb):
+    field_type = pb.type
+    if field_type == 0: # Scalar
+      return pb.scalar.value
+    elif field_type == 1: # Ranges
+      return [{"begin": ra.begin, "end": ra.end} for ra in pb.ranges.range]
+    elif field_type == 2: # Set
+      return pb.set.item
+    elif field_type == 3: # Text
+      return pb.text
+    else:
+      raise Exception("Unknown field type: %s" % field_type)
+
+  @staticmethod
+  def _decode_attribute(attr_pb):
+    return {attr_pb.name: HTTPProxyScheduler._decode_typed_field(attr_pb)}
+
+  @staticmethod
+  def _decode_resource(resource_pb):
+    return {resource_pb.name: HTTPProxyScheduler._decode_typed_field(resource_pb)}
+
   def resourceOffers(self, driver, offers):
     """
       Invoked when resources have been offered to this framework. A single
@@ -65,35 +88,12 @@ class HTTPProxyScheduler(mesos.Scheduler):
     for offer in offers:
       # protobuf -> dict
       raw_info = {
-        "attributes": [{
-          "name": a.name,
-          "ranges": [
-            {
-              "begin": ra.begin,
-              "end": ra.end
-            } for ra in a.ranges.range],
-          "scalar": a.scalar.value,
-          "set": [s for s in a.set.item],
-          "text": a.text,
-          "type": a.type,
-        } for a in offer.attributes],
+        "attributes": [HTTPProxyScheduler._decode_attribute(a) for a in offer.attributes],
         "executor_ids": [ei.value for ei in offer.executor_ids],
         "framework_id": offer.framework_id.value,
         "hostname": offer.hostname,
         "id": offer.id.value,
-        "resources": [
-          {
-            "name": r.name,
-            "ranges": [
-              {
-                "begin": ra.begin,
-                "end": ra.end
-              } for ra in r.ranges.range],
-            "role": r.role,
-            "scalar": r.scalar.value,
-            "set": [s for s in r.set.item],
-            "type": r.type
-          } for r in offer.resources],
+        "resources": [HTTPProxyScheduler._decode_resource(r) for r in offer.resources],
         "slave_id": offer.slave_id.value
       }
 
