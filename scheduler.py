@@ -10,6 +10,7 @@ import json
 from pprint import pprint
 import uuid
 
+import click
 import mesos
 import mesos_pb2
 import requests
@@ -234,15 +235,11 @@ class HTTPProxyScheduler(mesos.Scheduler):
     logging.error("Error from Mesos: %s" % message)
 
 
-if __name__ == "__main__":
-  if len(sys.argv) != 2:
-    print("Usage: %s master_host:master_port" % sys.argv[0])
-    sys.exit(1)
-
-  # TODO: take these on cmdline
-  log_level = "DEBUG"
-  service = "http://localhost:5000/"
-
+@click.command()
+@click.option('--service-url', help='URL root of your service, including scheme')
+@click.option('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server')
+@click.option('--log-level', default='info', help="Level to log at (info, warn, error, debug)")
+def main(service_url, mesos_master, log_level):
   logging.basicConfig(level=getattr(logging, log_level.upper()))
 
   executor = mesos_pb2.ExecutorInfo()
@@ -257,9 +254,9 @@ if __name__ == "__main__":
   framework.principal = "http-proxy"
 
   driver = mesos.MesosSchedulerDriver(
-    HTTPProxyScheduler(executor, service),
+    HTTPProxyScheduler(executor, service_url),
     framework,
-    sys.argv[1])
+    mesos_master)
 
   status = 0 if driver.run() == mesos_pb2.DRIVER_STOPPED else 1
 
@@ -267,3 +264,7 @@ if __name__ == "__main__":
   driver.stop();
 
   sys.exit(status)
+
+
+if __name__ == "__main__":
+  main()

@@ -13,7 +13,8 @@ sudo easy_install http://downloads.mesosphere.io/master/ubuntu/14.04/mesos-0.19.
 Example run:
 
 ```shell
-./scheduler.py 127.0.1.1:5050 # mesos master host:ip
+./scheduler.py --help
+./scheduler.py --service-url http://127.0.0.1:5000/
 ```
 
 This proxy will periodically `POST` a payload like this to the `/offer` endpoint of your service:
