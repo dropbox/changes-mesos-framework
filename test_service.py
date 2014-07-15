@@ -21,15 +21,15 @@ def offer():
   print("Received resource offer:")
   print(json.dumps(request.get_json(), sort_keys=True, indent=2, separators=(',', ': ')))
 
-  REQUIRED_MEM = 800
+  REQUIRED_MEM = 500
   REQUIRED_CPU = 0.5
 
   tasks_to_run = []
 
   info = request.get_json()
 
-  if info["resources"]["cpus"] > REQUIRED_CPU \
-     and info["resources"]["mem"] > REQUIRED_MEM:
+  if info["resources"]["cpus"] >= REQUIRED_CPU \
+     and info["resources"]["mem"] >= REQUIRED_MEM:
 
     tasks_to_run.append(
       {
