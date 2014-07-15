@@ -61,5 +61,26 @@ Your server should respond like:
 The proxy will also periodically send status updates about jobs to the `/status` endpoint of your service:
 
 ```json
-
+{
+  "id": "my_job",
+  "state": "running"
+}
 ```
+
+The `id` will correspond to the `id` you returned in your `/offer` endpoint.
+
+Possible states correspond directly to the Protocol Buffers version:
+
+```python
+states = {
+  0: "starting",
+  1: "running",
+  2: "finished", # terminal
+  3: "failed", # terminal
+  4: "killed", # terminal
+  5: "lost", # terminal
+  6: "staging",
+}
+```
+
+Terminal means the job is no longer running or attempting to run.

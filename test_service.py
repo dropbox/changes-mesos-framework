@@ -3,6 +3,7 @@
 from __future__ import print_function
 
 import json
+import random
 from pprint import pprint
 
 from flask import jsonify, Flask, Response, request
@@ -32,7 +33,7 @@ def offer():
 
     tasks_to_run.append(
       {
-        "id": "my_job",
+        "id": "my_job_" + str(random.randint(0, 1000)),
         "cmd": "pwd && /bin/sleep 300",
         "resources": {
           "cpus": REQUIRED_CPU,
