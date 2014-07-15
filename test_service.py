@@ -12,21 +12,29 @@ app = Flask(__name__)
 def index():
   return "Mesos HTTP Proxy test service."
 
+
 @app.route("/offer", methods = ['POST'])
 def offer():
-  pprint(request.form)
+  REQUIRED_MEM = 800
+  REQUIRED_CPU = 0.5
+
   tasks_to_run = []
 
-  tasks_to_run.append(
-    {
-      "id": "my_job",
-      "cmd": ["echo hello world"],
-      "resources": {
-        "cpus": 0.25,
-        "mem": 64
+  info = request.get_json()
+
+  if info["resources"]["cpus"] > REQUIRED_CPU \
+     and info["resources"]["mem"] > REQUIRED_MEM:
+
+    tasks_to_run.append(
+      {
+        "id": "my_job",
+        "cmd": "pwd && /bin/sleep 300",
+        "resources": {
+          "cpus": REQUIRED_CPU,
+          "mem": REQUIRED_MEM
+        }
       }
-    }
-  )
+    )
 
   return Response(json.dumps(tasks_to_run),  mimetype='application/json')
 

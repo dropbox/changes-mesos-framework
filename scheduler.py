@@ -95,12 +95,14 @@ class HTTPProxyScheduler(mesos.Scheduler):
         "framework_id": offer.framework_id.value,
         "hostname": offer.hostname,
         "id": offer.id.value,
-        "resources": {name: value for (name, value) in [HTTPProxyScheduler._decode_resource(r) for r in offer.resources]},
+        "resources": {name: value
+                      for (name, value)
+                      in [HTTPProxyScheduler._decode_resource(r) for r in offer.resources]},
         "slave_id": offer.slave_id.value,
       }
-
       logging.debug("Offer: " + json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
 
+      # hit service with our offer
       resp = requests.post(self.service + "offer",
                            data=json.dumps(info),
                            headers={'content-type': 'application/json'})
@@ -114,10 +116,11 @@ class HTTPProxyScheduler(mesos.Scheduler):
         logging.info("Accepting offer on %s to start task %s" % (offer.hostname, tid))
 
         task = mesos_pb2.TaskInfo()
+        task.name = "task %s" % tid
         task.task_id.value = str(tid)
         task.slave_id.value = offer.slave_id.value
-        task.name = "task %s" % tid
-        task.executor.MergeFrom(self.executor)
+        # task.executor.MergeFrom(self.executor)
+        task.command.value = task_to_run["cmd"]
 
         cpus = task.resources.add()
         cpus.name = "cpus"
