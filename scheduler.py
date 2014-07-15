@@ -103,9 +103,14 @@ class HTTPProxyScheduler(mesos.Scheduler):
       logging.debug("Offer: " + json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
 
       # hit service with our offer
-      resp = requests.post(self.service + "offer",
-                           data=json.dumps(info),
-                           headers={'content-type': 'application/json'})
+      try:
+        resp = requests.post(self.service + "offer",
+                             data=json.dumps(info),
+                             headers={'content-type': 'application/json'})
+      except:
+        logger.exception("Error POSTing offer to service at %s" % self.service)
+        return
+
       tasks_to_run = resp.json()
 
       tasks = []
@@ -177,9 +182,6 @@ class HTTPProxyScheduler(mesos.Scheduler):
       "id": update.task_id.value,
       "state": states[update.state]
     }
-    resp = requests.post(self.service + "status",
-                         data=json.dumps(status_update),
-                         headers={'content-type': 'application/json'})
 
     if update.state == mesos_pb2.TASK_FINISHED:
       self.tasksFinished += 1
@@ -190,6 +192,15 @@ class HTTPProxyScheduler(mesos.Scheduler):
       #   executor_id,
       #   slave_id,
       #   "Task %s finished" % update.task_id.value)
+
+    try:
+      resp = requests.post(self.service + "status",
+                           data=json.dumps(status_update),
+                           headers={'content-type': 'application/json'})
+    except:
+      logging.exception("Error POSTing status update to service at %s" % self.service)
+      return
+
 
   def frameworkMessage(self, driver, executorId, slaveId, message):
     """
