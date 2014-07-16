@@ -240,9 +240,9 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
 
 @click.command()
-@click.option('--service-url', help='URL root of your service, including scheme')
-@click.option('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server')
-@click.option('--log-level', default='info', help="Level to log at (info, warn, error, debug)")
+@click.option('--service-url', required=True, help='URL root of your service, including scheme. (e.g. http://localhost:5000/)')
+@click.option('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
+@click.option('--log-level', default='info', help="Level to log at. (e.g. info)")
 def main(service_url, mesos_master, log_level):
   logging.basicConfig(level=getattr(logging, log_level.upper()))
 
