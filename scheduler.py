@@ -109,10 +109,14 @@ class HTTPProxyScheduler(mesos.Scheduler):
                              data=json.dumps(info),
                              headers={'content-type': 'application/json'})
       except:
-        logger.exception("Error POSTing offer to service at %s" % self.service)
+        logging.exception("Error POSTing offer to service at %s" % self.service)
         return
 
-      tasks_to_run = resp.json()
+      try:
+        tasks_to_run = resp.json()
+      except:
+        logging.exception("Error parsing response from service: %s" % resp.text)
+        return
 
       tasks = []
       for task_to_run in tasks_to_run:
