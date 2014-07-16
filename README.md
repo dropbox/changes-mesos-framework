@@ -55,6 +55,7 @@ You will likely only care about the `resources` and `attributes` (if you set any
 [
   {
     "id": "my_job",
+    "cmd": "pwd && echo hello, world",
     "resources": {
       "cpus": 0.25,
       "mem": 64
