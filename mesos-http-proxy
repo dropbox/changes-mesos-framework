@@ -2,12 +2,14 @@
 
 from __future__ import print_function
 
+import atexit
+import json
 import logging
 import os
+import signal
+import subprocess
 import sys
 import time
-import json
-from pprint import pprint
 import uuid
 
 import click
@@ -146,7 +148,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
         tasks.append(task)
         # self.taskData[task.task_id.value] = (offer.slave_id, task.executor.executor_id)
-      driver.launchTasks(offer.id, tasks)
+        driver.launchTasks(offer.id, tasks)
 
   def offerRescinded(self, driver, offerId):
     """
@@ -270,5 +272,23 @@ def main(service_url, mesos_master, log_level):
   sys.exit(status)
 
 
+
 if __name__ == "__main__":
-  main()
+  # kill_child is a total hack because using the mesos driver seems to
+  # prevent the process from being interrupted. instead, we run the
+  # driver in a child and send a term signal on exit
+  child_pid = None
+  def kill_child():
+    if child_pid is None:
+      pass
+    else:
+      os.kill(child_pid, signal.SIGTERM)
+  atexit.register(kill_child)
+
+  if '--child' not in sys.argv:
+    p = subprocess.Popen(sys.argv + ['--child'])
+    child_pid = p.pid
+    p.wait()
+  else:
+    sys.argv.remove('--child')
+    main()
