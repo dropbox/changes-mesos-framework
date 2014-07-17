@@ -17,7 +17,6 @@ import mesos
 import mesos_pb2
 import requests
 
-
 class HTTPProxyScheduler(mesos.Scheduler):
   def __init__(self, executor, service):
     self.executor = executor
@@ -132,7 +131,19 @@ class HTTPProxyScheduler(mesos.Scheduler):
         task.task_id.value = str(tid)
         task.slave_id.value = offer.slave_id.value
 
-        task.command.value = task_to_run["cmd"]
+        if 'cmd' in task_to_run:
+          cmd = task_to_run["cmd"]
+        else:
+          args = {
+            'api_url': self.service,
+            'jobstep_id': tid,
+            'project': task_to_run["project"]["slug"],
+          }
+          cmd = "/usr/local/bin/changes-lxc-wrapper --api-url=%(api_url)s --jobstep-id=%(jobstep_id)s --project=%(project)s" % args
+
+        task.command.value = cmd
+        logging.debug("Scheduling cmd: %s" % cmd)
+
         # task.executor.MergeFrom(self.executor)
         # task.executor.data = task_to_run["cmd"].encode("utf-8")
 
@@ -283,7 +294,8 @@ if __name__ == "__main__":
       pass
     else:
       os.kill(child_pid, signal.SIGTERM)
-  atexit.register(kill_child)
+
+    atexit.register(kill_child)
 
   if '--child' not in sys.argv:
     p = subprocess.Popen(sys.argv + ['--child'])
