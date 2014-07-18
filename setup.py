@@ -5,12 +5,6 @@ import sys
 from setuptools import setup, find_packages
 
 
-requires = [
-  'click>=2.4.0,<2.5.0',
-  'Flask>=0.10.0,<0.11.0',
-  'requests>=2.3.0,<2.4.0',
-]
-
 setup_options = dict(
   name='mesos-http-proxy',
   version='0.1.0',
@@ -19,7 +13,6 @@ setup_options = dict(
   author_email='brett@bretthoerner.com',
   scripts=['mesos-http-proxy'],
   packages=find_packages(),
-  install_requires=requires,
   license="Apache License 2.0",
   classifiers=(
     'Intended Audience :: Developers',

@@ -10,12 +10,13 @@ import signal
 import subprocess
 import sys
 import time
+import urllib2
 import uuid
 
-import click
+import argparse
 import mesos
 import mesos_pb2
-import requests
+
 
 class HTTPProxyScheduler(mesos.Scheduler):
   def __init__(self, executor, service):
@@ -106,17 +107,12 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
       # hit service with our offer
       try:
-        resp = requests.post(self.service + "offer",
-                             data=json.dumps(info),
-                             headers={'content-type': 'application/json'})
+        req = urllib2.Request(self.service + "offer",
+                              json.dumps(info),
+                              {'Content-Type': 'application/json'})
+        tasks_to_run = json.loads(urllib2.urlopen(req).read())
       except:
         logging.exception("Error POSTing offer to service at %s" % self.service)
-        return
-
-      try:
-        tasks_to_run = resp.json()
-      except:
-        logging.exception("Error parsing response from service: %s" % resp.text)
         return
 
       tasks = []
@@ -212,9 +208,10 @@ class HTTPProxyScheduler(mesos.Scheduler):
       #   "Task %s finished" % update.task_id.value)
 
     try:
-      resp = requests.post(self.service + "status",
-                           data=json.dumps(status_update),
-                           headers={'content-type': 'application/json'})
+      req = urllib2.Request(self.service + "status",
+                            json.dumps(status_update),
+                            {'Content-Type': 'application/json'})
+      resp = urllib2.urlopen(req).read()
     except:
       logging.exception("Error POSTing status update to service at %s" % self.service)
       return
@@ -252,10 +249,6 @@ class HTTPProxyScheduler(mesos.Scheduler):
     logging.error("Error from Mesos: %s" % message)
 
 
-@click.command()
-@click.option('--service-url', required=True, help='URL root of your service, including scheme. (e.g. http://localhost:5000/)')
-@click.option('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
-@click.option('--log-level', default='info', help="Level to log at. (e.g. info)")
 def main(service_url, mesos_master, log_level):
   logging.basicConfig(level=getattr(logging, log_level.upper()))
 
@@ -303,4 +296,13 @@ if __name__ == "__main__":
     p.wait()
   else:
     sys.argv.remove('--child')
-    main()
+
+    parser = argparse.ArgumentParser(description='Mesos HTTP Proxy')
+
+    parser.add_argument('--service-url', required=True, help='URL root of your service, including scheme. (e.g. http://localhost:5000/)')
+    parser.add_argument('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
+    parser.add_argument('--log-level', default='info', help="Level to log at. (e.g. info)")
+
+    args = parser.parse_args(argv)
+
+    main(args.service_url, args.mesos_master, args.log_level)
