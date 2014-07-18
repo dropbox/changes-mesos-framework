@@ -51,8 +51,14 @@ def offer():
   return Response(json.dumps(tasks_to_run),  mimetype='application/json')
 
 
-@app.route("/jobsteps/<job_id>/deallocate/", methods = ['POST'])
+@app.route("/jobsteps/<job_id>/", methods = ['POST'])
 def status(job_id):
+  print("Received status update:")
+  print(json.dumps(request.get_json(), sort_keys=True, indent=2, separators=(',', ': ')))
+  return "OK"
+
+@app.route("/jobsteps/<job_id>/deallocate/", methods = ['POST'])
+def delallocate(job_id):
   print("Received status update:")
   print(json.dumps(request.get_json(), sort_keys=True, indent=2, separators=(',', ': ')))
   return "OK"
