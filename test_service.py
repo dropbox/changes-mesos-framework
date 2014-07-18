@@ -16,7 +16,7 @@ def index():
   return "Mesos HTTP Proxy test service."
 
 
-@app.route("/offer", methods = ['POST'])
+@app.route("/jobsteps/allocate/", methods = ['POST'])
 def offer():
   print("Received resource offer:")
   print(json.dumps(request.get_json(), sort_keys=True, indent=2, separators=(',', ': ')))
@@ -31,10 +31,14 @@ def offer():
   if info["resources"]["cpus"] >= REQUIRED_CPU \
      and info["resources"]["mem"] >= REQUIRED_MEM:
 
+    random_id = str(random.randint(0, 1000))
     tasks_to_run.append(
       {
-        "id": "my_job_" + str(random.randint(0, 1000)),
-        "cmd": "pwd && /bin/sleep " + str(random.randint(10, 60)),
+        "id": "my_job_" + random_id,
+        # "cmd": "pwd && /bin/sleep " + str(random.randint(10, 60)),
+        "project": {
+          "slug": random_id
+        },
         "resources": {
           "cpus": REQUIRED_CPU,
           "mem": REQUIRED_MEM
@@ -47,8 +51,8 @@ def offer():
   return Response(json.dumps(tasks_to_run),  mimetype='application/json')
 
 
-@app.route("/status", methods = ['POST'])
-def status():
+@app.route("/jobsteps/<job_id>/deallocate/", methods = ['POST'])
+def status(job_id):
   print("Received status update:")
   print(json.dumps(request.get_json(), sort_keys=True, indent=2, separators=(',', ': ')))
   return "OK"
