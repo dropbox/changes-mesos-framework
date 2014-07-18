@@ -115,6 +115,11 @@ class HTTPProxyScheduler(mesos.Scheduler):
         logging.exception("Error POSTing offer to service at %s" % self.service_url)
         return
 
+      if len(tasks_to_run) == 0:
+        logging.info("No tasks to run, declining offer: %s" % offer.id)
+        driver.declineOffer(offer.id)
+        continue
+
       tasks = []
       for task_to_run in tasks_to_run:
         tid = task_to_run["id"]
