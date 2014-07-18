@@ -221,6 +221,8 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
     if state == 'running':
       status_update("/jobsteps/%s/" % update.task_id.value, {"status": "in_progress"})
+    elif state == 'finished':
+      status_update("/jobsteps/%s/" % update.task_id.value, {"status": "finished"})
     elif state in ('failed', 'killed', 'lost'):
       status_update("/jobsteps/%s/deallocate/" % update.task_id.value, {})
 
