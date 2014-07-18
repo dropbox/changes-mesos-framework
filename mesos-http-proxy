@@ -135,7 +135,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
             'jobstep_id': tid,
             'project': task_to_run["project"]["slug"],
           }
-          cmd = "/usr/local/bin/changes-lxc-wrapper --api-url=%(api_url)s --jobstep-id=%(jobstep_id)s --project=%(project)s" % args
+          cmd = "changes-lxc-wrapper --api-url=%(api_url)s --jobstep-id=%(jobstep_id)s --project=%(project)s" % args
 
         task.command.value = cmd
         logging.debug("Scheduling cmd: %s" % cmd)
