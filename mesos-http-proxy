@@ -255,7 +255,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
     logging.error("Error from Mesos: %s" % message)
 
 
-def main(service_url, mesos_master, pre_launch, post_launch):
+def main(service_url, mesos_master, user, pre_launch, post_launch):
   executor = mesos_pb2.ExecutorInfo()
   executor.executor_id.value = "default"
   executor.command.value = os.path.abspath("./executor.py")
@@ -263,7 +263,7 @@ def main(service_url, mesos_master, pre_launch, post_launch):
   executor.source = "http_proxy"
 
   framework = mesos_pb2.FrameworkInfo()
-  framework.user = "" # Have Mesos fill in the current user.
+  framework.user = user
   framework.name = "HTTP Proxy Framework"
   framework.principal = "http-proxy"
 
@@ -286,11 +286,12 @@ if __name__ == "__main__":
 
   parser.add_argument('--service-url', required=True, help='URL root of your service, including scheme. (e.g. http://localhost:5000/)')
   parser.add_argument('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
-  parser.add_argument('--pre-launch', required=True, default='info')
-  parser.add_argument('--post-launch', required=True, default='info')
+  parser.add_argument('--user', default='root', help="User to run tasks as")
+  parser.add_argument('--pre-launch', required=True)
+  parser.add_argument('--post-launch', required=True)
   parser.add_argument('--log-level', default='info', help="Level to log at. (e.g. info)")
 
   args = parser.parse_args(sys.argv[1:])
   logging.basicConfig(level=getattr(logging, args.log_level.upper()))
 
-  main(args.service_url.rstrip('/'), args.mesos_master, args.pre_launch, args.post_launch)
+  main(args.service_url.rstrip('/'), args.mesos_master, args.user, args.pre_launch, args.post_launch)
