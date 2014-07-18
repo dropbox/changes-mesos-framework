@@ -302,6 +302,6 @@ if __name__ == "__main__":
     parser.add_argument('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
     parser.add_argument('--log-level', default='info', help="Level to log at. (e.g. info)")
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(sys.argv[1:])
 
     main(args.service_url, args.mesos_master, args.log_level)
