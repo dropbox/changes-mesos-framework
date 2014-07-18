@@ -107,7 +107,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
       # hit service with our offer
       try:
-        req = urllib2.Request(self.service + "offer",
+        req = urllib2.Request(self.service + "jobsteps/allocate/",
                               json.dumps(info),
                               {'Content-Type': 'application/json'})
         tasks_to_run = json.loads(urllib2.urlopen(req).read())
@@ -190,12 +190,8 @@ class HTTPProxyScheduler(mesos.Scheduler):
       6: "staging",
     }
 
+    state = states[update.state]
     logging.info("Task %s is in state %d" % (update.task_id.value, update.state))
-
-    status_update = {
-      "id": update.task_id.value,
-      "state": states[update.state]
-    }
 
     if update.state == mesos_pb2.TASK_FINISHED:
       self.tasksFinished += 1
@@ -207,9 +203,12 @@ class HTTPProxyScheduler(mesos.Scheduler):
       #   slave_id,
       #   "Task %s finished" % update.task_id.value)
 
+    if state not in ('failed', 'killed', 'lost'):
+      return
+
     try:
-      req = urllib2.Request(self.service + "status",
-                            json.dumps(status_update),
+      req = urllib2.Request(self.service + "jobsteps/%s/deallocate/" % update.task_id.value,
+                            json.dumps({}),
                             {'Content-Type': 'application/json'})
       resp = urllib2.urlopen(req).read()
     except:
