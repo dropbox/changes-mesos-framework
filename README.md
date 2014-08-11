@@ -14,10 +14,10 @@ Example run:
 
 ```shell
 changes-mesos-scheduler --help
-changes-mesos-scheduler --service-url http://127.0.0.1:5000/
+changes-mesos-scheduler --api-url http://127.0.0.1:5000/
 ```
 
-This proxy will periodically `POST` a payload like this to the `/offer` endpoint of your service:
+This proxy will periodically `POST` a payload like this to the allocation endpoint of Changes:
 
 ```json
 {
@@ -81,13 +81,13 @@ Possible states correspond directly to the Protocol Buffers version:
 
 ```python
 states = {
-  0: "starting",
-  1: "running",
-  2: "finished", # terminal
-  3: "failed", # terminal
-  4: "killed", # terminal
-  5: "lost", # terminal
-  6: "staging",
+    0: "starting",
+    1: "running",
+    2: "finished",  # terminal
+    3: "failed",  # terminal
+    4: "killed",  # terminal
+    5: "lost",  # terminal
+    6: "staging",
 }
 ```
 

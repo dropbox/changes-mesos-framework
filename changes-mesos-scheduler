@@ -288,7 +288,7 @@ def main(service_url, mesos_master, user, pre_launch, post_launch):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Mesos HTTP Proxy')
 
-    parser.add_argument('--service-url', required=True, help='URL root of your service, including scheme. (e.g. http://localhost:5000/)')
+    parser.add_argument('--api-url', required=True, help='URL root of Changes API, including scheme. (e.g. http://localhost:5000/api/0/)')
     parser.add_argument('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
     parser.add_argument('--user', default='root', help="User to run tasks as")
     parser.add_argument('--pre-launch', required=True)
