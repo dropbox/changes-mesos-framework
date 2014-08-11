@@ -155,7 +155,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
                     }
                     cmd = "changes-lxc-wrapper --api-url=%(api_url)s " \
                           "--jobstep-id=%(jobstep_id)s " \
-                          "--s3-bucket=%(s3_bucket)s" \
+                          "--s3-bucket=%(s3_bucket)s " \
                           "--pre-launch=%(pre_launch)s " \
                           "--post-launch=%(post_launch)s" % args
 
