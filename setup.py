@@ -6,7 +6,7 @@ from setuptools import setup, find_packages
 
 
 setup_options = dict(
-  name='mesos-http-proxy',
+  name='changes-mesos-scheduler',
   version='0.1.0',
   description='Mesos HTTP Proxy.',
   author='Brett Hoerner',

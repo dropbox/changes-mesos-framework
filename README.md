@@ -1,5 +1,5 @@
-Mesos HTTP Proxy
-================
+Changes Mesos Scheduler
+=======================
 
 ```shell
 git clone git@github.com:mesosphere/playa-mesos.git
@@ -13,8 +13,8 @@ sudo easy_install http://downloads.mesosphere.io/master/ubuntu/14.04/mesos-0.19.
 Example run:
 
 ```shell
-mesos-http-proxy --help
-mesos-http-proxy --service-url http://127.0.0.1:5000/
+changes-mesos-scheduler --help
+changes-mesos-scheduler --service-url http://127.0.0.1:5000/
 ```
 
 This proxy will periodically `POST` a payload like this to the `/offer` endpoint of your service:
