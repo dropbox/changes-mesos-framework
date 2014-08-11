@@ -140,11 +140,9 @@ class HTTPProxyScheduler(mesos.Scheduler):
                         'jobstep_id': tid,
                         'post_launch': self.post_launch,
                         'pre_launch': self.pre_launch,
-                        'project': task_to_run["project"]["slug"],
                     }
                     cmd = "changes-lxc-wrapper --api-url=%(api_url)s " \
                           "--jobstep-id=%(jobstep_id)s " \
-                          "--project=%(project)s " \
                           "--pre-launch=%(pre_launch)s " \
                           "--post-launch=%(post_launch)s" % args
 
