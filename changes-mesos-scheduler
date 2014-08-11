@@ -225,11 +225,11 @@ class HTTPProxyScheduler(mesos.Scheduler):
         def status_update(url, body):
             try:
                 req = urllib2.Request(
-                    self.service_url + url, json.dumps(body),
+                    self.api_url + url, json.dumps(body),
                     {'Content-Type': 'application/json'})
                 urllib2.urlopen(req).read()
             except Exception:
-                logging.exception("Error POSTing status update to service at %s" % self.service_url)
+                logging.exception("Error POSTing status update to service at %s" % self.api_url)
 
         if state == 'running':
             status_update("/jobsteps/%s/" % update.task_id.value, {"status": "in_progress"})
@@ -270,7 +270,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
         logging.error("Error from Mesos: %s" % message)
 
 
-def main(service_url, mesos_master, user, pre_launch, post_launch):
+def main(api_url, mesos_master, user, pre_launch, post_launch):
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "default"
     executor.command.value = os.path.abspath("./executor.py")
@@ -283,7 +283,7 @@ def main(service_url, mesos_master, user, pre_launch, post_launch):
     framework.principal = "http-proxy"
 
     driver = mesos.MesosSchedulerDriver(
-        HTTPProxyScheduler(executor, service_url, pre_launch, post_launch),
+        HTTPProxyScheduler(executor, api_url, pre_launch, post_launch),
         framework,
         mesos_master)
 
@@ -308,4 +308,4 @@ if __name__ == "__main__":
     args = parser.parse_args(sys.argv[1:])
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
 
-    main(args.service_url.rstrip('/'), args.mesos_master, args.user, args.pre_launch, args.post_launch)
+    main(args.api_url, args.mesos_master, args.user, args.pre_launch, args.post_launch)
