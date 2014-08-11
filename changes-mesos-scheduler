@@ -174,7 +174,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
 
                 tasks.append(task)
                 # self.taskData[task.task_id.value] = (offer.slave_id, task.executor.executor_id)
-                driver.launchTasks(offer.id, tasks)
+            driver.launchTasks(offer.id, tasks)
 
     def offerRescinded(self, driver, offerId):
         """
