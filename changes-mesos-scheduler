@@ -260,29 +260,29 @@ class HTTPProxyScheduler(mesos.Scheduler):
         logging.error("Error from Mesos: %s" % message)
 
 
-    def main(service_url, mesos_master, user, pre_launch, post_launch):
-        executor = mesos_pb2.ExecutorInfo()
-        executor.executor_id.value = "default"
-        executor.command.value = os.path.abspath("./executor.py")
-        executor.name = "HTTP Proxy Executor"
-        executor.source = "http_proxy"
+def main(service_url, mesos_master, user, pre_launch, post_launch):
+    executor = mesos_pb2.ExecutorInfo()
+    executor.executor_id.value = "default"
+    executor.command.value = os.path.abspath("./executor.py")
+    executor.name = "HTTP Proxy Executor"
+    executor.source = "http_proxy"
 
-        framework = mesos_pb2.FrameworkInfo()
-        framework.user = user
-        framework.name = "HTTP Proxy Framework"
-        framework.principal = "http-proxy"
+    framework = mesos_pb2.FrameworkInfo()
+    framework.user = user
+    framework.name = "HTTP Proxy Framework"
+    framework.principal = "http-proxy"
 
-        driver = mesos.MesosSchedulerDriver(
-            HTTPProxyScheduler(executor, service_url, pre_launch, post_launch),
-            framework,
-            mesos_master)
+    driver = mesos.MesosSchedulerDriver(
+        HTTPProxyScheduler(executor, service_url, pre_launch, post_launch),
+        framework,
+        mesos_master)
 
-        status = 0 if driver.run() == mesos_pb2.DRIVER_STOPPED else 1
+    status = 0 if driver.run() == mesos_pb2.DRIVER_STOPPED else 1
 
-        # Ensure that the driver process terminates.
-        driver.stop();
+    # Ensure that the driver process terminates.
+    driver.stop()
 
-        sys.exit(status)
+    sys.exit(status)
 
 
 if __name__ == "__main__":
