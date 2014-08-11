@@ -226,13 +226,15 @@ class HTTPProxyScheduler(mesos.Scheduler):
             #   "Task %s finished" % update.task_id.value)
 
         def status_update(url, body):
+            full_url = self.api_url + url
             try:
                 req = urllib2.Request(
-                    self.api_url + url, json.dumps(body),
+                    full_url, json.dumps(body),
                     {'Content-Type': 'application/json'})
                 urllib2.urlopen(req).read()
             except Exception:
-                logging.exception("Error POSTing status update to service at %s" % self.api_url)
+                logging.exception("Error POSTing status update to service at %s",
+                                  full_url)
 
         if state == 'running':
             status_update("/jobsteps/%s/" % update.task_id.value, {"status": "in_progress"})
