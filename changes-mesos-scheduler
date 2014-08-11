@@ -12,6 +12,20 @@ import sys
 import urllib2
 
 
+def install_sentry_logger():
+    try:
+        import raven
+    except ImportError:
+        return
+    else:
+        from raven.conf import setup_logging
+        from raven.handlers.logging import SentryHandler
+
+        client = raven.Client()
+        handler = SentryHandler(client)
+        setup_logging(handler)
+
+
 class HTTPProxyScheduler(mesos.Scheduler):
     def __init__(self, executor, service_url, pre_launch, post_launch):
         self.executor = executor
@@ -29,7 +43,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
           master, and the masterInfo which is information about the master
           itself.
         """
-        logging.warn("Registered with framework ID %s" % frameworkId.value)
+        logging.info("Registered with framework ID %s" % frameworkId.value)
 
     def reregistered(self, driver, masterInfo):
         """
@@ -38,14 +52,14 @@ class HTTPProxyScheduler(mesos.Scheduler):
           registered.  masterInfo contains information about the newly elected
           master.
         """
-        logging.warn("Re-Registered with new master")
+        logging.info("Re-Registered with new master")
 
     def disconnected(self, driver):
         """
           Invoked when the scheduler becomes disconnected from the master, e.g.
           the master fails and another is taking over.
         """
-        logging.warn("Disconnected from master")
+        logging.info("Disconnected from master")
 
     @staticmethod
     def _decode_typed_field(pb):
