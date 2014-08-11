@@ -307,6 +307,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args(sys.argv[1:])
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
-
-    main(args.api_url, args.mesos_master, args.user, args.pre_launch, args.post_launch)
     install_sentry_logger()
+
+    try:
+        main(args.api_url, args.mesos_master, args.user, args.pre_launch, args.post_launch)
+    except Exception as e:
+        logging.exception(unicode(e))
+        raise
