@@ -118,11 +118,11 @@ class HTTPProxyScheduler(mesos.Scheduler):
             # hit service with our offer
             try:
                 req = urllib2.Request(
-                    self.service_url + "/jobsteps/allocate/", json.dumps(info),
+                    self.api_url + "/jobsteps/allocate/", json.dumps(info),
                     {'Content-Type': 'application/json'})
                 tasks_to_run = json.loads(urllib2.urlopen(req).read())
             except Exception:
-                logging.exception("Error POSTing offer to service at %s" % self.service_url)
+                logging.exception("Error POSTing offer to service at %s" % self.api_url)
                 return
 
             if len(tasks_to_run) == 0:
@@ -146,7 +146,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
                     cmd = task_to_run["cmd"]
                 else:
                     args = {
-                        'api_url': self.service_url,
+                        'api_url': self.api_url,
                         'jobstep_id': tid,
                         'post_launch': self.post_launch,
                         'pre_launch': self.pre_launch,
