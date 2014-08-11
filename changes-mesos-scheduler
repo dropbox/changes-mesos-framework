@@ -259,7 +259,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
           Invoked when an executor has exited/terminated. Note that any tasks
           running will have TASK_LOST status updates automatically generated.
         """
-        logging.warn("Executor %s lost on slave %s" % (exeuctorId.value, slaveId.value))
+        logging.warn("Executor %s lost on slave %s" % (executorId.value, slaveId.value))
 
     def error(self, driver, message):
         """
