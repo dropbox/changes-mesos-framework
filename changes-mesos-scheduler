@@ -236,11 +236,17 @@ class HTTPProxyScheduler(mesos.Scheduler):
                 logging.exception("Error POSTing status update to service at %s",
                                   full_url)
 
-        if state == 'running':
-            status_update("/jobsteps/%s/" % update.task_id.value, {"status": "in_progress"})
-        elif state == 'finished':
+        # TODO(dcramer): when can we actually properly do deallocation?
+        # Relying on the lxc-wrapper to mark things as in_progress at least
+        # allows us to have a best-effort
+        if state == 'finished':
             status_update("/jobsteps/%s/" % update.task_id.value, {"status": "finished"})
-        elif state in ('failed', 'killed', 'lost'):
+        elif state == 'failed':
+            status_update("/jobsteps/%s/" % update.task_id.value, {
+                "status": "finished",
+                "result": "failed",
+            })
+        elif state in ('killed', 'lost'):
             status_update("/jobsteps/%s/deallocate/" % update.task_id.value, {})
 
     def frameworkMessage(self, driver, executorId, slaveId, message):
