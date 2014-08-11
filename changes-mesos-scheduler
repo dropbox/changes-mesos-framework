@@ -27,9 +27,9 @@ def install_sentry_logger():
 
 
 class HTTPProxyScheduler(mesos.Scheduler):
-    def __init__(self, executor, service_url, pre_launch, post_launch):
+    def __init__(self, executor, api_url, pre_launch, post_launch):
         self.executor = executor
-        self.service_url = service_url
+        self.api_url = api_url
         self.pre_launch = pre_launch
         self.post_launch = post_launch
         # self.taskData = {}
