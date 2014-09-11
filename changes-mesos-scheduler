@@ -44,7 +44,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
           master, and the masterInfo which is information about the master
           itself.
         """
-        logging.info("Registered with framework ID %s" % frameworkId.value)
+        logging.info("Registered with framework ID %s", frameworkId.value)
 
     def reregistered(self, driver, masterInfo):
         """
@@ -74,7 +74,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
         elif field_type == 3:  # Text
             return pb.text
         else:
-            raise Exception("Unknown field type: %s" % field_type)
+            raise Exception("Unknown field type: %s", field_type)
 
     @staticmethod
     def _decode_attribute(attr_pb):
@@ -99,7 +99,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
           framework has already launched tasks with those resources then those
           tasks will fail with a TASK_LOST status and a message saying as much).
         """
-        logging.info("Got %d resource offers" % len(offers))
+        logging.info("Got %d resource offers", len(offers))
 
         for offer in offers:
             # protobuf -> dict
@@ -114,7 +114,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
                               in [HTTPProxyScheduler._decode_resource(r) for r in offer.resources]},
                 "slave_id": offer.slave_id.value,
             }
-            logging.debug("Offer: " + json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
+            logging.debug("Offer: %s", json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
 
             # hit service with our offer
             try:
@@ -123,11 +123,11 @@ class HTTPProxyScheduler(mesos.Scheduler):
                     {'Content-Type': 'application/json'})
                 tasks_to_run = json.loads(urllib2.urlopen(req).read())
             except Exception:
-                logging.exception("Error POSTing offer to service at %s" % self.api_url)
+                logging.exception("Error POSTing offer to service at %s", self.api_url)
                 return
 
             if len(tasks_to_run) == 0:
-                logging.info("No tasks to run, declining offer: %s" % offer.id)
+                logging.info("No tasks to run, declining offer: %s", offer.id)
                 driver.declineOffer(offer.id)
                 continue
 
@@ -136,7 +136,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
                 tid = task_to_run["id"]
                 self.tasksLaunched += 1
 
-                logging.info("Accepting offer on %s to start task %s" % (offer.hostname, tid))
+                logging.info("Accepting offer on %s to start task %s", offer.hostname, tid)
 
                 task = mesos_pb2.TaskInfo()
                 task.name = "task %s" % tid
@@ -160,7 +160,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
                           "--post-launch=%(post_launch)s" % args
 
                 task.command.value = cmd
-                logging.debug("Scheduling cmd: %s" % cmd)
+                logging.debug("Scheduling cmd: %s", cmd)
 
                 # task.executor.MergeFrom(self.executor)
                 # task.executor.data = task_to_run["cmd"].encode("utf-8")
@@ -188,7 +188,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
           invalid offer will receive TASK_LOST status updats for those tasks
           (see Scheduler.resourceOffers).
         """
-        logging.info("Offer rescinded: %s" % offerId.value)
+        logging.info("Offer rescinded: %s", offerId.value)
 
     def statusUpdate(self, driver, update):
         """
@@ -213,7 +213,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
         }
 
         state = states[update.state]
-        logging.info("Task %s is in state %d" % (update.task_id.value, update.state))
+        logging.info("Task %s is in state %d", update.task_id.value, update.state)
 
         if update.state == mesos_pb2.TASK_FINISHED:
             self.tasksFinished += 1
@@ -255,7 +255,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
           effort; do not expect a framework message to be retransmitted in any
           reliable fashion.
         """
-        logging.info("Received message: %s" % repr(str(message)))
+        logging.info("Received message: %s", repr(str(message)))
 
     def slaveLost(self, driver, slaveId):
         """
@@ -263,14 +263,14 @@ class HTTPProxyScheduler(mesos.Scheduler):
           failure, network partition.) Most frameworks will need to reschedule
           any tasks launched on this slave on a new slave.
         """
-        logging.warn("Slave lost: %s" % slaveId.value)
+        logging.warn("Slave lost: %s", slaveId.value)
 
     def executorLost(self, driver, executorId, slaveId, status):
         """
           Invoked when an executor has exited/terminated. Note that any tasks
           running will have TASK_LOST status updates automatically generated.
         """
-        logging.warn("Executor %s lost on slave %s" % (executorId.value, slaveId.value))
+        logging.warn("Executor %s lost on slave %s", executorId.value, slaveId.value)
 
     def error(self, driver, message):
         """
@@ -278,7 +278,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
           scheduler driver.  The driver will be aborted BEFORE invoking this
           callback.
         """
-        logging.error("Error from Mesos: %s" % message)
+        logging.error("Error from Mesos: %s", message)
 
 
 def main(api_url, mesos_master, user, s3_bucket, pre_launch, post_launch):
