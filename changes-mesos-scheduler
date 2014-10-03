@@ -139,7 +139,10 @@ class HTTPProxyScheduler(mesos.Scheduler):
                 logging.info("Accepting offer on %s to start task %s", offer.hostname, tid)
 
                 task = mesos_pb2.TaskInfo()
-                task.name = "task %s" % tid
+                task.name = "{} {}".format(
+                    task_to_run['project']['slug'],
+                    tid,
+                )
                 task.task_id.value = str(tid)
                 task.slave_id.value = offer.slave_id.value
 
