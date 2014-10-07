@@ -22,7 +22,7 @@ def install_sentry_logger():
     from raven.handlers.logging import SentryHandler
 
     client = raven.Client()
-    handler = SentryHandler(client)
+    handler = SentryHandler(client, level=logging.WARN)
     setup_logging(handler)
 
 
