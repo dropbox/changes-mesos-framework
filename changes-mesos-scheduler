@@ -120,8 +120,9 @@ class HTTPProxyScheduler(mesos.Scheduler):
                     {'Content-Type': 'application/json'})
                 tasks_to_run = json.loads(urllib2.urlopen(req).read())
             except Exception:
+                driver.declineOffer(offer.id)
                 logging.exception("Error POSTing offer to service at %s", self.api_url)
-                return
+                continue
 
             if len(tasks_to_run) == 0:
                 logging.info("No tasks to run, declining offer: %s", offer.id)
