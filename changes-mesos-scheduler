@@ -27,12 +27,9 @@ def install_sentry_logger():
 
 
 class HTTPProxyScheduler(mesos.Scheduler):
-    def __init__(self, executor, api_url, s3_bucket, pre_launch, post_launch):
+    def __init__(self, executor, api_url):
         self.executor = executor
         self.api_url = api_url
-        self.s3_bucket = s3_bucket
-        self.pre_launch = pre_launch
-        self.post_launch = post_launch
         # self.taskData = {}
         self.tasksLaunched = 0
         self.tasksFinished = 0
@@ -146,21 +143,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
                 task.task_id.value = str(tid)
                 task.slave_id.value = offer.slave_id.value
 
-                if 'cmd' in task_to_run:
-                    cmd = task_to_run["cmd"]
-                else:
-                    args = {
-                        'api_url': self.api_url,
-                        'jobstep_id': tid,
-                        'post_launch': self.post_launch,
-                        'pre_launch': self.pre_launch,
-                        's3_bucket': self.s3_bucket,
-                    }
-                    cmd = "changes-lxc-wrapper --api-url=%(api_url)s " \
-                          "--jobstep-id=%(jobstep_id)s " \
-                          "--s3-bucket=%(s3_bucket)s " \
-                          "--pre-launch=%(pre_launch)s " \
-                          "--post-launch=%(post_launch)s" % args
+                cmd = task_to_run["cmd"]
 
                 task.command.value = cmd
                 logging.debug("Scheduling cmd: %s", cmd)
@@ -284,7 +267,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
         logging.error("Error from Mesos: %s", message)
 
 
-def main(api_url, mesos_master, user, s3_bucket, pre_launch, post_launch):
+def main(api_url, mesos_master, user):
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "default"
     executor.command.value = os.path.abspath("./executor.py")
@@ -297,7 +280,7 @@ def main(api_url, mesos_master, user, s3_bucket, pre_launch, post_launch):
     framework.principal = "http-proxy"
 
     driver = mesos.MesosSchedulerDriver(
-        HTTPProxyScheduler(executor, api_url, s3_bucket, pre_launch, post_launch),
+        HTTPProxyScheduler(executor, api_url),
         framework,
         mesos_master)
 
@@ -313,11 +296,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Mesos HTTP Proxy')
 
     parser.add_argument('--api-url', required=True, help='URL root of Changes API, including scheme. (e.g. http://localhost:5000/api/0/)')
-    parser.add_argument('--s3-bucket', required=True, help='S3 bucket for snapshots')
     parser.add_argument('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
     parser.add_argument('--user', default='root', help="User to run tasks as")
-    parser.add_argument('--pre-launch', required=True)
-    parser.add_argument('--post-launch', required=True)
     parser.add_argument('--log-level', default='info', help="Level to log at. (e.g. info)")
 
     args = parser.parse_args(sys.argv[1:])
@@ -325,8 +305,7 @@ if __name__ == "__main__":
     install_sentry_logger()
 
     try:
-        main(args.api_url, args.mesos_master, args.user, args.s3_bucket,
-             args.pre_launch, args.post_launch)
+        main(args.api_url, args.mesos_master, args.user)
     except Exception as e:
         logging.exception(unicode(e))
         raise
