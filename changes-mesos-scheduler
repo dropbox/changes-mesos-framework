@@ -229,6 +229,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
         if state == 'finished':
             status_update("/jobsteps/%s/" % status.task_id.value, {"status": "finished"})
         elif state == 'failed':
+            logging.error('Task %s failed', extra={'data': vars(state)})
             status_update("/jobsteps/%s/" % status.task_id.value, {
                 "status": "finished",
                 "result": "failed",
