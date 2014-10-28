@@ -177,7 +177,7 @@ class HTTPProxyScheduler(mesos.Scheduler):
         """
         logging.info("Offer rescinded: %s", offerId.value)
 
-    def statusUpdate(self, driver, update):
+    def statusUpdate(self, driver, status):
         """
           Invoked when the status of a task has changed (e.g., a slave is lost
           and so the task is lost, a task finishes and an executor sends a
@@ -199,18 +199,18 @@ class HTTPProxyScheduler(mesos.Scheduler):
             6: "staging",
         }
 
-        state = states[update.state]
-        logging.info("Task %s is in state %d", update.task_id.value, update.state)
+        state = states[status.state]
+        logging.info("Task %s is in state %d", status.task_id.value, status.state)
 
-        if update.state == mesos_pb2.TASK_FINISHED:
+        if status.state == mesos_pb2.TASK_FINISHED:
             self.tasksFinished += 1
 
-            # slave_id, executor_id = self.taskData[update.task_id.value]
+            # slave_id, executor_id = self.taskData[status.task_id.value]
 
             # driver.sendFrameworkMessage(
             #   executor_id,
             #   slave_id,
-            #   "Task %s finished" % update.task_id.value)
+            #   "Task %s finished" % status.task_id.value)
 
         def status_update(url, body):
             full_url = self.api_url + url
@@ -227,14 +227,14 @@ class HTTPProxyScheduler(mesos.Scheduler):
         # Relying on the lxc-wrapper to mark things as in_progress at least
         # allows us to have a best-effort
         if state == 'finished':
-            status_update("/jobsteps/%s/" % update.task_id.value, {"status": "finished"})
+            status_update("/jobsteps/%s/" % status.task_id.value, {"status": "finished"})
         elif state == 'failed':
-            status_update("/jobsteps/%s/" % update.task_id.value, {
+            status_update("/jobsteps/%s/" % status.task_id.value, {
                 "status": "finished",
                 "result": "failed",
             })
         elif state in ('killed', 'lost'):
-            status_update("/jobsteps/%s/deallocate/" % update.task_id.value, {})
+            status_update("/jobsteps/%s/deallocate/" % status.task_id.value, {})
 
     def frameworkMessage(self, driver, executorId, slaveId, message):
         """
