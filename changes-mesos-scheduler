@@ -229,12 +229,13 @@ class HTTPProxyScheduler(mesos.Scheduler):
         if state == 'finished':
             status_update("/jobsteps/%s/" % status.task_id.value, {"status": "finished"})
         elif state == 'failed':
-            logging.error('Task %s failed', extra={'data': vars(state)})
+            logging.error('Task %s failed', status.task_id.value, extra={'data': vars(state)})
             status_update("/jobsteps/%s/" % status.task_id.value, {
                 "status": "finished",
                 "result": "failed",
             })
         elif state in ('killed', 'lost'):
+            logging.warn('Task %s %s', status.task_id.value, state, extra={'data': vars(state)})
             status_update("/jobsteps/%s/deallocate/" % status.task_id.value, {})
 
     def frameworkMessage(self, driver, executorId, slaveId, message):
