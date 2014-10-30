@@ -5,11 +5,16 @@ from __future__ import absolute_import, print_function
 import argparse
 import json
 import logging
-import mesos
-import mesos_pb2
 import os
 import sys
 import urllib2
+
+try:
+    from mesos.interface import Scheduler
+    from mesos.interface import mesos_pb2
+except ImportError:
+    from mesos import Scheduler
+    import mesos_pb2
 
 
 def install_sentry_logger():
@@ -26,7 +31,7 @@ def install_sentry_logger():
     setup_logging(handler)
 
 
-class HTTPProxyScheduler(mesos.Scheduler):
+class HTTPProxyScheduler(Scheduler):
     def __init__(self, executor, api_url):
         self.executor = executor
         self.api_url = api_url
