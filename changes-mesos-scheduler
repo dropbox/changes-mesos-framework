@@ -10,10 +10,11 @@ import sys
 import urllib2
 
 try:
+    from mesos.native import MesosSchedulerDriver
     from mesos.interface import Scheduler
     from mesos.interface import mesos_pb2
 except ImportError:
-    from mesos import Scheduler
+    from mesos import MesosSchedulerDriver, Scheduler
     import mesos_pb2
 
 
@@ -287,7 +288,7 @@ def main(api_url, mesos_master, user):
     framework.name = "HTTP Proxy Framework"
     framework.principal = "http-proxy"
 
-    driver = mesos.MesosSchedulerDriver(
+    driver = MesosSchedulerDriver(
         HTTPProxyScheduler(executor, api_url),
         framework,
         mesos_master)
