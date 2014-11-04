@@ -36,7 +36,7 @@ def install_sentry_logger():
     setup_logging(handler)
 
 
-class HTTPProxyScheduler(Scheduler):
+class ChangesScheduler(Scheduler):
     def __init__(self, executor, api_url):
         self.executor = executor
         self.api_url = api_url
@@ -86,11 +86,11 @@ class HTTPProxyScheduler(Scheduler):
 
     @staticmethod
     def _decode_attribute(attr_pb):
-        return {attr_pb.name: HTTPProxyScheduler._decode_typed_field(attr_pb)}
+        return {attr_pb.name: ChangesScheduler._decode_typed_field(attr_pb)}
 
     @staticmethod
     def _decode_resource(resource_pb):
-        return (resource_pb.name, HTTPProxyScheduler._decode_typed_field(resource_pb))
+        return (resource_pb.name, ChangesScheduler._decode_typed_field(resource_pb))
 
     @property
     def activeTasks(self):
@@ -121,14 +121,14 @@ class HTTPProxyScheduler(Scheduler):
 
             # protobuf -> dict
             info = {
-                "attributes": [HTTPProxyScheduler._decode_attribute(a) for a in offer.attributes],
+                "attributes": [ChangesScheduler._decode_attribute(a) for a in offer.attributes],
                 "executor_ids": [ei.value for ei in offer.executor_ids],
                 "framework_id": offer.framework_id.value,
                 "hostname": offer.hostname,
                 "id": offer.id.value,
                 "resources": {name: value
                               for (name, value)
-                              in [HTTPProxyScheduler._decode_resource(r) for r in offer.resources]},
+                              in [ChangesScheduler._decode_resource(r) for r in offer.resources]},
                 "slave_id": offer.slave_id.value,
             }
             logging.debug("Offer: %s", json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
@@ -303,16 +303,16 @@ def main(api_url, mesos_master, user):
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "default"
     executor.command.value = os.path.abspath("./executor.py")
-    executor.name = "HTTP Proxy Executor"
-    executor.source = "http_proxy"
+    executor.name = "Changes Executor"
+    executor.source = "changes"
 
     framework = mesos_pb2.FrameworkInfo()
     framework.user = user
-    framework.name = "HTTP Proxy Framework"
-    framework.principal = "http-proxy"
+    framework.name = "Changes Scheduler"
+    framework.principal = "changes"
 
     driver = MesosSchedulerDriver(
-        HTTPProxyScheduler(executor, api_url),
+        ChangesScheduler(executor, api_url),
         framework,
         mesos_master)
 
