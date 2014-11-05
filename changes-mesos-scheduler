@@ -12,6 +12,7 @@ import urllib2
 
 from time import sleep
 from threading import Event
+from uuid import uuid4
 
 try:
     from mesos.native import MesosSchedulerDriver
@@ -152,15 +153,15 @@ class ChangesScheduler(Scheduler):
 
             tasks = []
             for task_to_run in tasks_to_run:
-                tid = task_to_run["id"]
+                tid = uuid4().hex
                 self.tasksLaunched += 1
 
                 logging.info("Accepting offer on %s to start task %s", offer.hostname, tid)
 
                 task = mesos_pb2.TaskInfo()
-                task.name = "{} {}".format(
+                task.name = "{}/{}".format(
                     task_to_run['project']['slug'],
-                    tid,
+                    task_to_run['id'],
                 )
                 task.task_id.value = str(tid)
                 task.slave_id.value = offer.slave_id.value
