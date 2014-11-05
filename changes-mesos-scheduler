@@ -249,23 +249,18 @@ class ChangesScheduler(Scheduler):
         # allows us to have a best-effort
         if state == 'finished':
             api_request("/jobsteps/%s/" % status.task_id.value, {"status": "finished"})
-        elif state == 'failed':
-            logging.error('Task %s failed: %s', status.task_id.value, status.message)
+        elif state in ('killed', 'lost', 'failed'):
+            logging.warn('Task %s %s: %s', status.task_id.value, state, status.message)
+
             api_request(
                 url='/jobsteps/%s/logappend/' % status.task_id.value,
                 body={
-                    'text': '[scheduler] task failed to execute:\n\n%s' % (
-                        status.message),
+                    'text': '[scheduler] task marked as %s (will be retried):\n\n%s' % (
+                        state, status.message),
                     'source': 'console',
                 }
             )
 
-            api_request("/jobsteps/%s/" % status.task_id.value, {
-                "status": "finished",
-                "result": "failed",
-            })
-        elif state in ('killed', 'lost'):
-            logging.warn('Task %s %s: %s', status.task_id.value, state, status.message)
             api_request("/jobsteps/%s/deallocate/" % status.task_id.value, {})
 
     def frameworkMessage(self, driver, executorId, slaveId, message):
