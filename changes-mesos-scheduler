@@ -255,7 +255,7 @@ class ChangesScheduler(Scheduler):
             api_request(
                 url='/jobsteps/%s/logappend/' % status.task_id.value,
                 body={
-                    'text': '[scheduler] task marked as %s (will be retried):\n\n%s' % (
+                    'text': '==> Scheduler marked task as %s (will be retried):\n\n%s' % (
                         state, status.message),
                     'source': 'console',
                 }
