@@ -26,6 +26,7 @@ def install_sentry_logger():
     try:
         import raven
     except ImportError:
+        logging.warning('Unable to find raven library. Sentry integration disabled.')
         return
 
     from raven.conf import setup_logging
