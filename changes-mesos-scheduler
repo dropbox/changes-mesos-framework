@@ -225,12 +225,12 @@ class ChangesScheduler(Scheduler):
         state = states[status.state]
         logging.info("Task %s is in state %d", status.task_id.value, status.state)
 
-        jobstep_id = self.taskJobStepMapping[status.task_id.value]
+        jobstep_id = self.taskJobStepMapping.get(status.task_id.value)
 
         if status.state == mesos_pb2.TASK_FINISHED:
             self.tasksFinished += 1
 
-            del self.taskJobStepMapping[status.task_id.value]
+            self.taskJobStepMapping.pop(status.task_id.value, None)
 
         def api_request(url, body):
             full_url = self.api_url + url
@@ -242,6 +242,11 @@ class ChangesScheduler(Scheduler):
             except Exception:
                 logging.exception("Error POSTing status update to service at %s",
                                   full_url)
+
+        if not jobstep_id:
+            # TODO(dcramer): how does this happen?
+            logging.error("Task %s is missing JobStep ID", status.task_id.value)
+            return
 
         # TODO(dcramer): when can we actually properly do deallocation?
         # Relying on the lxc-wrapper to mark things as in_progress at least
