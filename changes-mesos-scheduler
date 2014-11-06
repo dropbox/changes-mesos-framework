@@ -306,14 +306,16 @@ def main(api_url, mesos_master, user):
     framework.name = "Changes Scheduler"
     framework.principal = "changes"
 
+    scheduler = ChangesScheduler(executor, api_url)
+
     driver = MesosSchedulerDriver(
-        ChangesScheduler(executor, api_url),
+        scheduler,
         framework,
         mesos_master)
 
     def handle_interrupt(signal, frame):
         logging.info("Received interrupt, shutting down")
-        driver.shuttingDown.set()
+        scheduler.shuttingDown.set()
         while driver.activeTasks > 0:
             logging.info("Waiting for %d tasks to finish running", driver.activeTasks)
             sleep(5)
