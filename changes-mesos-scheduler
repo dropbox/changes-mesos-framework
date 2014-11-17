@@ -159,7 +159,7 @@ class ChangesScheduler(Scheduler):
                 logging.info("Accepting offer on %s to start task %s", offer.hostname, tid)
 
                 task = mesos_pb2.TaskInfo()
-                task.name = "{}/{}".format(
+                task.name = "{} {}".format(
                     task_to_run['project']['slug'],
                     task_to_run['id'],
                 )
