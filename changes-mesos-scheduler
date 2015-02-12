@@ -82,7 +82,7 @@ class ChangesScheduler(Scheduler):
         elif field_type == 2:  # Set
             return pb.set.item
         elif field_type == 3:  # Text
-            return pb.text
+            return pb.text.value
         else:
             raise Exception("Unknown field type: %s", field_type)
 
@@ -143,7 +143,7 @@ class ChangesScheduler(Scheduler):
                 tasks_to_run = json.loads(urllib2.urlopen(req).read())
             except Exception:
                 driver.declineOffer(offer.id)
-                logging.exception("Error POSTing offer to service at %s", self.api_url)
+                logging.exception("Error POSTing offer to service at %s", req.get_full_url())
                 continue
 
             if len(tasks_to_run) == 0:
