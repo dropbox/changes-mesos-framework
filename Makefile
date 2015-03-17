@@ -1,5 +1,5 @@
 PKG_NAME = changes-mesos-scheduler
-VERSION = 0.0.1
+VERSION = 0.0.2
 REV=`git rev-list HEAD --count`
 
 deb:
