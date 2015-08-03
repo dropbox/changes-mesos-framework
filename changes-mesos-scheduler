@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+import time
 import urllib2
 
 from time import sleep
@@ -21,6 +22,14 @@ try:
 except ImportError:
     from mesos import MesosSchedulerDriver, Scheduler
     import mesos_pb2
+
+
+# Configuration should contain the file 'blacklist' which
+# is a line-separated lists of hosts to blacklist.
+#
+# NOTE: inside ec2, hostnames look like
+# ip-*-*-*-*.region.compute.internal
+DEFAULT_CONFIG_DIR='/etc/changes-mesos-scheduler'
 
 
 def install_sentry_logger():
@@ -39,13 +48,15 @@ def install_sentry_logger():
 
 
 class ChangesScheduler(Scheduler):
-    def __init__(self, executor, api_url):
+    def __init__(self, executor, api_url, config_dir):
         self.executor = executor
         self.api_url = api_url
         self.taskJobStepMapping = {}
         self.tasksLaunched = 0
         self.tasksFinished = 0
         self.shuttingDown = Event()
+        self.blacklist_path = os.path.join(config_dir, 'blacklist')
+        self._refresh_blacklist()
 
     def registered(self, driver, frameworkId, masterInfo):
         """
@@ -71,6 +82,26 @@ class ChangesScheduler(Scheduler):
           the master fails and another is taking over.
         """
         logging.info("Disconnected from master")
+
+    def _should_refresh_blacklist(self):
+        """
+          Detects if we need to reload the blacklist configuration
+          based on the timestamps of the blacklist path file.
+        """
+        return os.path.getmtime(self.blacklist_path) > self.blacklist_time
+
+    def _refresh_blacklist(self):
+        """
+          Reload the blacklist by reading blacklist_path and adding
+          the hostnames to the blacklist set, one per line. Note that
+          the "blank" hostname will get added if there are any blank
+          lines because we don't sort them out but this shouldn't
+          be an issue.
+        """
+        logging.info('Refreshing blacklist')
+        self.blacklist_time = int(time.time())
+        with open(self.blacklist_path) as file:
+            self.blacklist = set([s.strip() for s in file.readlines() if not s.startswith('#')])
 
     @staticmethod
     def _decode_typed_field(pb):
@@ -115,9 +146,17 @@ class ChangesScheduler(Scheduler):
         """
         logging.info("Got %d resource offers", len(offers))
 
+        if self._should_refresh_blacklist():
+            self._refresh_blacklist()
+
         for offer in offers:
             if self.shuttingDown.is_set():
                 logging.info("Shutting down, declining offer: %s", offer.id)
+                driver.declineOffer(offer.id)
+                continue
+
+            if offer.hostname in self.blacklist:
+                logging.info("Declining offer from blacklisted hostname: %s", offer.hostname)
                 driver.declineOffer(offer.id)
                 continue
 
@@ -299,7 +338,7 @@ class ChangesScheduler(Scheduler):
         logging.error("Error from Mesos: %s", message)
 
 
-def main(api_url, mesos_master, user):
+def main(api_url, mesos_master, user, config_dir):
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "default"
     executor.command.value = os.path.abspath("./executor.py")
@@ -311,7 +350,7 @@ def main(api_url, mesos_master, user):
     framework.name = "Changes Scheduler"
     framework.principal = "changes"
 
-    scheduler = ChangesScheduler(executor, api_url)
+    scheduler = ChangesScheduler(executor, api_url, config_dir)
 
     driver = MesosSchedulerDriver(
         scheduler,
@@ -343,13 +382,14 @@ if __name__ == "__main__":
     parser.add_argument('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
     parser.add_argument('--user', default='root', help="User to run tasks as")
     parser.add_argument('--log-level', default='info', help="Level to log at. (e.g. info)")
+    parser.add_argument('--config-dir', default=DEFAULT_CONFIG_DIR, help='Configuration directory')
 
     args = parser.parse_args(sys.argv[1:])
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
     install_sentry_logger()
 
     try:
-        main(args.api_url, args.mesos_master, args.user)
+        main(args.api_url, args.mesos_master, args.user, args.config_dir)
     except Exception as e:
         logging.exception(unicode(e))
         raise
