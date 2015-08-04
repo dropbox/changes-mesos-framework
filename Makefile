@@ -1,6 +1,8 @@
 PKG_NAME = changes-mesos-scheduler
 VERSION = 0.0.2
-REV=`git rev-list HEAD --count`
+# Revision shows date of latest commit and abbreviated commit SHA
+# E.g., 1438708515-753e183
+REV=`git show -s --format=%ct-%h HEAD`
 
 deb:
 	mkdir -p build/usr/local/bin
