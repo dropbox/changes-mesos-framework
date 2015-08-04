@@ -293,18 +293,23 @@ class ChangesScheduler(Scheduler):
         if state == 'finished':
             api_request("/jobsteps/%s/" % jobstep_id, {"status": "finished"})
         elif state in ('killed', 'lost', 'failed'):
+            # Jobsteps are only intended to be executed once and should only exit non-zero or be
+            # lost/killed by infrastructural issues, so we don't attempt to reschedule, and we mark
+            # this down as an infrastructural failure. Note that this state may not mean that the
+            # Jobstep will necessarily stop executing, but it means that the results will be
+            # considered immediately invalid.
             logging.warn('Task %s %s: %s', jobstep_id, state, status.message)
 
             api_request(
                 url='/jobsteps/%s/logappend/' % jobstep_id,
                 body={
-                    'text': '==> Scheduler marked task as %s (will be retried):\n\n%s' % (
+                    'text': '==> Scheduler marked task as %s (will NOT be retried):\n\n%s' % (
                         state, status.message),
                     'source': 'console',
                 }
             )
 
-            api_request("/jobsteps/%s/deallocate/" % jobstep_id, {})
+            api_request("/jobsteps/%s/" % jobstep_id, {"status": "finished", "result": "infra_failed"})
 
     def frameworkMessage(self, driver, executorId, slaveId, message):
         """
