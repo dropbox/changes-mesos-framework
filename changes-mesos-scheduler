@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import urllib2
 
@@ -29,7 +30,7 @@ except ImportError:
 #
 # NOTE: inside ec2, hostnames look like
 # ip-*-*-*-*.region.compute.internal
-DEFAULT_CONFIG_DIR='/etc/changes-mesos-scheduler'
+DEFAULT_CONFIG_DIR = '/etc/changes-mesos-scheduler'
 
 
 def install_sentry_logger():
@@ -48,8 +49,8 @@ def install_sentry_logger():
 
 
 class ChangesScheduler(Scheduler):
-    def __init__(self, executor, api_url, config_dir):
-        self.executor = executor
+    def __init__(self, api_url, config_dir, state_file):
+        self.framework_id = None
         self.api_url = api_url
         self.taskJobStepMapping = {}
         self.tasksLaunched = 0
@@ -57,6 +58,22 @@ class ChangesScheduler(Scheduler):
         self.shuttingDown = Event()
         self.blacklist_path = os.path.join(config_dir, 'blacklist')
         self._refresh_blacklist()
+        self.state_file = state_file
+
+        # Restore state from a previous run
+        if not self.state_file:
+            logging.warning("State file location not set. Not restoring old state.")
+        elif not os.path.exists(self.state_file):
+            logging.warning("State file not found. Not restoring old state.")
+        else:
+            try:
+                self.restore_state()
+            except Exception:
+                logging.exception("Failed to restore state. Continuing as a new scheduler.")
+            else:
+                # Delete the old file to prevent it from being used again on a restart
+                # as it will likely be stale.
+                os.remove(self.state_file)
 
     def registered(self, driver, frameworkId, masterInfo):
         """
@@ -66,6 +83,7 @@ class ChangesScheduler(Scheduler):
           itself.
         """
         logging.info("Registered with framework ID %s", frameworkId.value)
+        self.framework_id = frameworkId.value
 
     def reregistered(self, driver, masterInfo):
         """
@@ -342,8 +360,41 @@ class ChangesScheduler(Scheduler):
         """
         logging.error("Error from Mesos: %s", message)
 
+    def save_state(self):
+        """
+          Save current state to a file so that a restart of the scheduler can
+          restore the state.
+        """
+        state = {}
+        state['framework_id'] = self.framework_id
+        state['taskJobStepMapping'] = self.taskJobStepMapping
+        state['tasksLaunched'] = self.tasksLaunched
+        state['tasksFinished'] = self.tasksFinished
+        logging.info('Attempting to save state for framework %s with %d running tasks to %s',
+                     self.framework_id, len(self.taskJobStepMapping), self.state_file)
+        with open(self.state_file, 'w') as f:
+            f.write(json.dumps(state))
 
-def main(api_url, mesos_master, user, config_dir):
+    def restore_state(self):
+        """
+          Restores state from the previous run of the scheduler.
+        """
+        with open(self.state_file) as f:
+            json_state = f.read()
+        state = json.loads(json_state)
+
+        self.framework_id = state['framework_id']
+        self.taskJobStepMapping = state['taskJobStepMapping']
+        self.tasksLaunched = state['tasksLaunched']
+        self.tasksFinished = state['tasksFinished']
+
+        logging.info('Restored state for framework %s with %d running tasks from %s',
+                     self.framework_id, len(self.taskJobStepMapping), self.state_file)
+
+
+def main(api_url, mesos_master, user, config_dir, state_file):
+    scheduler = ChangesScheduler(api_url, config_dir, state_file)
+
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "default"
     executor.command.value = os.path.abspath("./executor.py")
@@ -354,28 +405,62 @@ def main(api_url, mesos_master, user, config_dir):
     framework.user = user
     framework.name = "Changes Scheduler"
     framework.principal = "changes"
+    # Give the scheduler 30s to restart before mesos cancels the tasks.
+    framework.failover_timeout = 30
 
-    scheduler = ChangesScheduler(executor, api_url, config_dir)
+    if scheduler.framework_id:
+        framework.id.value = scheduler.framework_id
+        executor.framework_id.value = scheduler.framework_id
 
     driver = MesosSchedulerDriver(
         scheduler,
         framework,
         mesos_master)
 
+    stopped = threading.Event()
+
     def handle_interrupt(signal, frame):
+        stopped.set()
         logging.info("Received interrupt, shutting down")
+        logging.warning("Not saving state. Will wait for running tasks to finish.")
         scheduler.shuttingDown.set()
-        while driver.activeTasks > 0:
-            logging.info("Waiting for %d tasks to finish running", driver.activeTasks)
+        while scheduler.activeTasks > 0:
+            logging.info("Waiting for %d tasks to finish running", scheduler.activeTasks)
             sleep(5)
         driver.stop()
 
-    signal.signal(signal.SIGINT, handle_interrupt)
+    def handle_sigterm(signal, frame):
+        stopped.set()
+        logging.info("Received sigterm, shutting down")
+        scheduler.shuttingDown.set()
+        if scheduler.state_file:
+            try:
+                scheduler.save_state()
+                logging.info("Successfully saved state to %s.", state_file)
+            except Exception:
+                logging.exception("Failed to save state")
+                driver.stop()
+                return
+            # With `failover` set to true, we do not tell Mesos to stop the existing tasks
+            # started by this framework. Instead, the tasks will run for
+            # `fail_timeout` more seconds set above or we start a scheduler with
+            # the same framework id.
+            driver.stop(True)
+        else:
+            logging.warning("State file location not set. Not saving state. Existing builds will be cancelled.")
+            driver.stop()
 
-    status = 0 if driver.run() == mesos_pb2.DRIVER_STOPPED else 1
+    signal.signal(signal.SIGINT, handle_interrupt)
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    driver.start()
+    logging.info("Driver started")
+    stopped.wait()
+    status = 0 if driver.join() == mesos_pb2.DRIVER_STOPPED else 1
 
     # Ensure that the driver process terminates.
-    driver.stop()
+    if status == 1:
+        driver.stop()
 
     sys.exit(status)
 
@@ -388,13 +473,14 @@ if __name__ == "__main__":
     parser.add_argument('--user', default='root', help="User to run tasks as")
     parser.add_argument('--log-level', default='info', help="Level to log at. (e.g. info)")
     parser.add_argument('--config-dir', default=DEFAULT_CONFIG_DIR, help='Configuration directory')
+    parser.add_argument('--state-file', default=None, help='File path preserve state across restarts')
 
     args = parser.parse_args(sys.argv[1:])
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
     install_sentry_logger()
 
     try:
-        main(args.api_url, args.mesos_master, args.user, args.config_dir)
+        main(args.api_url, args.mesos_master, args.user, args.config_dir, args.state_file)
     except Exception as e:
         logging.exception(unicode(e))
         raise
