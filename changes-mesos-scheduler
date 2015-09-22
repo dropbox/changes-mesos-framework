@@ -455,7 +455,8 @@ def main(api_url, mesos_master, user, config_dir, state_file):
 
     driver.start()
     logging.info("Driver started")
-    stopped.wait()
+    while not stopped.is_set():
+        stopped.wait(3)
     status = 0 if driver.join() == mesos_pb2.DRIVER_STOPPED else 1
 
     # Ensure that the driver process terminates.
