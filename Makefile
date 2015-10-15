@@ -5,8 +5,6 @@ VERSION = 0.0.2
 REV=`git show -s --format=%ct-%h HEAD`
 
 deb:
-	mkdir -p build/usr/local/bin
-	cp changes-mesos-scheduler build/usr/local/bin/
-	fpm -s dir -t deb -n $(PKG_NAME) -v "$(VERSION)-$(REV)" -a all -C ./build .
+	fpm --no-python-fix-name -n $(PKG_NAME) -v "$(VERSION)-$(REV)" -s python -t deb setup.py
 
 .PHONY: deb
