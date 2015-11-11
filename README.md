@@ -1,20 +1,45 @@
 Changes Mesos Scheduler
 =======================
+Setting up the vagrant VM:
+
+```shell
+vagrant up
+vagrant ssh
+
+# Installs the mesos python package.
+sudo easy_install http://downloads.mesosphere.io/master/ubuntu/14.04/mesos-0.19.0_rc2-py2.7-linux-x86_64.egg
+```
+
+Building a deb:
+
+```shell
+cd /vagrant
+make deb
+```
+
+Running tests:
+```shell
+cd /vagrant
+make test
+```
+
+Running the scheduler requires having mesos set up and running but this vagrant VM is not set up to do that yet. You can instead use a different one:
 
 ```shell
 git clone git@github.com:mesosphere/playa-mesos.git
+cp your-changes-mesos-scheduler.deb playa-mesos/
 cd playa-mesos
+
 vagrant up
 vagrant ssh
 
 sudo easy_install http://downloads.mesosphere.io/master/ubuntu/14.04/mesos-0.19.0_rc2-py2.7-linux-x86_64.egg
-```
+sudo dpkg -i /vagrant/your-changes-mesos-scheduler.deb
+mkdir /etc/changes-mesos-scheduler
+sudo touch /etc/changes-mesos-scheduler/blacklist
 
-Example run:
-
-```shell
 changes-mesos-scheduler --help
-changes-mesos-scheduler --api-url http://127.0.0.1:5000/
+changes-mesos-scheduler --api-url your-changes-endpoint
 ```
 
 This proxy will periodically `POST` a payload like this to the allocation endpoint of Changes:
