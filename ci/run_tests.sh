@@ -1,6 +1,6 @@
 #!/bin/bash -eux
 
 
-make test
+make coverage
 
 make deb
