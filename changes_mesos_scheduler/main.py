@@ -19,6 +19,7 @@ except ImportError:
     import mesos_pb2
 
 from .changes_scheduler import ChangesScheduler
+from .statsreporter import StatsReporter
 
 # Configuration should contain the file 'blacklist' which
 # is a line-separated lists of hosts to blacklist.
@@ -43,8 +44,8 @@ def install_sentry_logger():
     setup_logging(handler)
 
 
-def run(api_url, mesos_master, user, config_dir, state_file):
-    scheduler = ChangesScheduler(api_url, config_dir, state_file)
+def run(api_url, mesos_master, user, config_dir, state_file, stats=None):
+    scheduler = ChangesScheduler(api_url, config_dir, state_file, stats=stats)
 
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "default"
@@ -120,19 +121,32 @@ def run(api_url, mesos_master, user, config_dir, state_file):
 def main():
     parser = argparse.ArgumentParser(description='Mesos HTTP Proxy')
 
-    parser.add_argument('--api-url', required=True, help='URL root of Changes API, including scheme. (e.g. http://localhost:5000/api/0/)')
-    parser.add_argument('--mesos-master', default='127.0.1.1:5050', help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
+    parser.add_argument('--api-url', required=True,
+                        help='URL root of Changes API, including scheme. (e.g. http://localhost:5000/api/0/)')
+    parser.add_argument('--mesos-master', default='127.0.1.1:5050',
+                        help='Location of Mesos master server. (e.g. 127.0.1.1:5050)')
     parser.add_argument('--user', default='root', help="User to run tasks as")
     parser.add_argument('--log-level', default='info', help="Level to log at. (e.g. info)")
     parser.add_argument('--config-dir', default=DEFAULT_CONFIG_DIR, help='Configuration directory')
     parser.add_argument('--state-file', default=None, help='File path preserve state across restarts')
+    parser.add_argument('--statsd-host', default=None, help='Host to report stats to')
+    parser.add_argument('--statsd-port', default=8125, help='Port for on statsd host to send to')
+    parser.add_argument('--statsd-prefix', default='changes_scheduler', help='Prefix for stats keys')
 
     args = parser.parse_args(sys.argv[1:])
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
     install_sentry_logger()
 
+    stats = None
+    if args.statsd_host:
+        stats = StatsReporter({
+            'STATSD_HOST':   args.statsd_host,
+            'STATSD_PORT':   args.statsd_port,
+            'STATSD_PREFIX': args.statsd_prefix,
+        }).stats()
+
     try:
-        run(args.api_url, args.mesos_master, args.user, args.config_dir, args.state_file)
+        run(args.api_url, args.mesos_master, args.user, args.config_dir, args.state_file, stats)
     except Exception as e:
         logging.exception(unicode(e))
         raise

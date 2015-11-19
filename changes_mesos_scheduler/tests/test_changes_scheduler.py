@@ -40,3 +40,13 @@ class ChangesSchedulerTest(TestCase):
         blacklist.close()
         cs.resourceOffers(driver, [offer])
         driver.declineOffer.assert_called_once_with(offer.id)
+
+    def test_error_stats(self):
+        test_dir = tempfile.mkdtemp()
+        open(test_dir + '/blacklist', 'w+').close()
+
+        stats = mock.Mock()
+        cs = ChangesScheduler('changes url', test_dir, 'nostatefile', stats=stats)
+        driver = mock.Mock()
+        cs.error(driver, 'message')
+        stats.incr.assert_called_once_with('errors')

@@ -16,4 +16,4 @@ sudo apt-get install -y python-pip
 
 sudo apt-get install -y python-mesos
 
-sudo pip install -r test-requirements.txt
+sudo make install-test-requirements

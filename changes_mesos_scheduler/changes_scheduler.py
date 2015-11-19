@@ -6,6 +6,8 @@ import os
 import time
 import urllib2
 
+from changes_mesos_scheduler import statsreporter
+
 from threading import Event
 from uuid import uuid4
 
@@ -45,13 +47,15 @@ class FileBlacklist(object):
 
 
 class ChangesScheduler(Scheduler):
-    def __init__(self, api_url, config_dir, state_file):
+    def __init__(self, api_url, config_dir, state_file, stats=None):
         self.framework_id = None
         self.api_url = api_url
         self.taskJobStepMapping = {}
         self.tasksLaunched = 0
         self.tasksFinished = 0
         self.shuttingDown = Event()
+        # Use the provided Stats or create a no-op one.
+        self._stats = stats or statsreporter.Stats(None)
         self._blacklist = FileBlacklist(os.path.join(config_dir, 'blacklist'))
         # Refresh now so that if it fails, it fails at startup.
         self._blacklist.refresh()
@@ -140,6 +144,7 @@ class ChangesScheduler(Scheduler):
           tasks will fail with a TASK_LOST status and a message saying as much).
         """
         logging.info("Got %d resource offers", len(offers))
+        self._stats.incr('offers', len(offers))
 
         self._blacklist.refresh()
 
@@ -335,6 +340,7 @@ class ChangesScheduler(Scheduler):
           callback.
         """
         logging.error("Error from Mesos: %s", message)
+        self._stats.incr('errors')
 
     def save_state(self):
         """
