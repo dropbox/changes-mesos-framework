@@ -1,6 +1,8 @@
 import os
 import tempfile
 
+import mock
+
 from unittest import TestCase
 
 from changes_scheduler import ChangesScheduler
@@ -23,3 +25,18 @@ class ChangesSchedulerTest(TestCase):
         assert 3 == cs2.tasksFinished
         assert {'task x': ['jobstep x']} == cs2.taskJobStepMapping
         assert not os.path.exists(state_file)
+
+    def test_blacklist(self):
+        test_dir = tempfile.mkdtemp()
+        state_file = test_dir + '/test.json'
+        blacklist = open(test_dir + '/blacklist', 'w+')
+
+        cs = ChangesScheduler('changes url', test_dir, state_file)
+        driver = mock.Mock()
+        offer = mock.Mock()
+        offer.hostname = 'some_hostname.com'
+        offer.id = '999'
+        blacklist.write('some_hostname.com\n')
+        blacklist.close()
+        cs.resourceOffers(driver, [offer])
+        driver.declineOffer.assert_called_once_with(offer.id)

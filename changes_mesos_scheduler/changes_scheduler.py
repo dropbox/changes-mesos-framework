@@ -17,6 +17,33 @@ except ImportError:
     import mesos_pb2
 
 
+class FileBlacklist(object):
+    """ File-backed blacklist for slave hostnames.
+    Hosts are expected to be named in the file, one per line.
+    Whitespace and lines beginning with '#' are ignored.
+    """
+    def __init__(self, path):
+        self._path = path
+        self._mtime = 0
+        self._blacklist = set()
+
+    def refresh(self):
+        """Refresh the blacklist if the file changed."""
+        if os.path.getmtime(self._path) > self._mtime:
+            self._refresh()
+
+    def _refresh(self):
+        """Unconditionally refresh the blacklist from the file."""
+        logging.info('Refreshing blacklist')
+        self._mtime = int(time.time())
+        with open(self._path) as file:
+            self._blacklist = set([s.strip() for s in file.readlines() if not s.startswith('#')])
+
+    def contains(self, hostname):
+        """Returns whether the provided hostname is present in the blacklist as of last reading."""
+        return hostname in self._blacklist
+
+
 class ChangesScheduler(Scheduler):
     def __init__(self, api_url, config_dir, state_file):
         self.framework_id = None
@@ -25,8 +52,9 @@ class ChangesScheduler(Scheduler):
         self.tasksLaunched = 0
         self.tasksFinished = 0
         self.shuttingDown = Event()
-        self.blacklist_path = os.path.join(config_dir, 'blacklist')
-        self._refresh_blacklist()
+        self._blacklist = FileBlacklist(os.path.join(config_dir, 'blacklist'))
+        # Refresh now so that if it fails, it fails at startup.
+        self._blacklist.refresh()
         self.state_file = state_file
 
         # Restore state from a previous run
@@ -69,26 +97,6 @@ class ChangesScheduler(Scheduler):
           the master fails and another is taking over.
         """
         logging.info("Disconnected from master")
-
-    def _should_refresh_blacklist(self):
-        """
-          Detects if we need to reload the blacklist configuration
-          based on the timestamps of the blacklist path file.
-        """
-        return os.path.getmtime(self.blacklist_path) > self.blacklist_time
-
-    def _refresh_blacklist(self):
-        """
-          Reload the blacklist by reading blacklist_path and adding
-          the hostnames to the blacklist set, one per line. Note that
-          the "blank" hostname will get added if there are any blank
-          lines because we don't sort them out but this shouldn't
-          be an issue.
-        """
-        logging.info('Refreshing blacklist')
-        self.blacklist_time = int(time.time())
-        with open(self.blacklist_path) as file:
-            self.blacklist = set([s.strip() for s in file.readlines() if not s.startswith('#')])
 
     @staticmethod
     def _decode_typed_field(pb):
@@ -133,8 +141,7 @@ class ChangesScheduler(Scheduler):
         """
         logging.info("Got %d resource offers", len(offers))
 
-        if self._should_refresh_blacklist():
-            self._refresh_blacklist()
+        self._blacklist.refresh()
 
         for offer in offers:
             if self.shuttingDown.is_set():
@@ -142,7 +149,7 @@ class ChangesScheduler(Scheduler):
                 driver.declineOffer(offer.id)
                 continue
 
-            if offer.hostname in self.blacklist:
+            if self._blacklist.contains(offer.hostname):
                 logging.info("Declining offer from blacklisted hostname: %s", offer.hostname)
                 driver.declineOffer(offer.id)
                 continue
@@ -359,5 +366,3 @@ class ChangesScheduler(Scheduler):
 
         logging.info('Restored state for framework %s with %d running tasks from %s',
                      self.framework_id, len(self.taskJobStepMapping), self.state_file)
-
-
