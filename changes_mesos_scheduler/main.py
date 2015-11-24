@@ -18,7 +18,7 @@ except ImportError:
     from mesos import MesosSchedulerDriver
     import mesos_pb2
 
-from .changes_scheduler import ChangesScheduler
+from .changes_scheduler import ChangesScheduler, ChangesAPI
 from .statsreporter import StatsReporter
 
 # Configuration should contain the file 'blacklist' which
@@ -45,7 +45,7 @@ def install_sentry_logger():
 
 
 def run(api_url, mesos_master, user, config_dir, state_file, stats=None):
-    scheduler = ChangesScheduler(api_url, config_dir, state_file, stats=stats)
+    scheduler = ChangesScheduler(config_dir, state_file, api=ChangesAPI(api_url), stats=stats)
 
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "default"

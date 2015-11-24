@@ -46,10 +46,83 @@ class FileBlacklist(object):
         return hostname in self._blacklist
 
 
+class APIError(Exception):
+    """An Exception originating from ChangesAPI.
+    This mostly exists so that our uncertainty of the possible Exceptions
+    originating from API requests doesn't muddy the error handling in the Scheduler.
+    """
+    def __init__(self, msg, cause=None):
+        super(APIError, self).__init__(msg)
+        self.cause = cause
+
+
+class ChangesAPI(object):
+    """Client for the Changes API, intended for Scheduler use.
+    Any exceptions resulting from runtime failures should be APIErrors.
+    """
+
+    def __init__(self, api_url):
+        self._api_url = api_url
+
+    def _api_request(self, path, body):
+        full_url = self._api_url + path
+        try:
+            req = urllib2.Request(
+                full_url, json.dumps(body),
+                {'Content-Type': 'application/json'})
+            # Any connectivity issues will raise an exception, as will some error statuses.
+            content = urllib2.urlopen(req).read()
+            return json.loads(content)
+        except Exception as exc:
+            # Always log exceptions so callers don't have to.
+            logging.exception("Error POSTing to Changes at %s", full_url)
+            raise APIError("Error POSTing to Changes at %s" % full_url, exc)
+
+    def allocate_jobsteps(self, info):
+        """ Given resource constraints for a slave, return a list of JobSteps to run on it.
+
+        Args:
+            info (dict): Dictionary of offer info.
+
+        Returns:
+            list: List of JobSteps to allocate.
+        """
+        return self._api_request("/jobsteps/allocate", info)
+
+    def update_jobstep(self, jobstep_id, status, result=None):
+        """ Update the recorded status and possibly result of a JobStep in Changes.
+
+        Args:
+            jobstep_id (str): JobStep ID.
+            status (str): Status (one of "finished", "queued", "in_progress").
+            result (str): Optionally one of 'failed', 'passed', 'aborted', 'skipped', or 'infra_failed'.
+        """
+        data = {"status": status}
+        if result:
+            data["result"] = result
+        self._api_request("/jobsteps/{}/".format(jobstep_id), data)
+
+    def jobstep_console_append(self, jobstep_id, text):
+        """ Append to the JobStep's console log.
+        Args:
+            jobstep_id (str): JobStep ID.
+            text (str): Text to append.
+        """
+        url = '/jobsteps/%s/logappend/' % jobstep_id
+        self._api_request(url, {'source': 'console', 'text': text})
+
+
 class ChangesScheduler(Scheduler):
-    def __init__(self, api_url, config_dir, state_file, stats=None):
+    def __init__(self, config_dir, state_file, api, stats=None):
+        """
+        Args:
+            config_dir (str): Directory in which we'll find the blacklist.
+            state_file (str): Path where serialized internal state will be stored.
+            api (ChangesAPI): API to use for interacting with Changes.
+            stats (statsreporter.Stats): Optional Stats instance to use.
+        """
         self.framework_id = None
-        self.api_url = api_url
+        self._changes_api = api
         self.taskJobStepMapping = {}
         self.tasksLaunched = 0
         self.tasksFinished = 0
@@ -175,13 +248,9 @@ class ChangesScheduler(Scheduler):
 
             # hit service with our offer
             try:
-                req = urllib2.Request(
-                    self.api_url + "/jobsteps/allocate/", json.dumps(info),
-                    {'Content-Type': 'application/json'})
-                tasks_to_run = json.loads(urllib2.urlopen(req).read())
-            except Exception:
+                tasks_to_run = self._changes_api.allocate_jobsteps(info)
+            except APIError:
                 driver.declineOffer(offer.id)
-                logging.exception("Error POSTing offer to service at %s", req.get_full_url())
                 continue
 
             if len(tasks_to_run) == 0:
@@ -267,30 +336,18 @@ class ChangesScheduler(Scheduler):
 
         if status.state == mesos_pb2.TASK_FINISHED:
             self.tasksFinished += 1
-
             self.taskJobStepMapping.pop(status.task_id.value, None)
-
-        def api_request(url, body):
-            full_url = self.api_url + url
-            try:
-                req = urllib2.Request(
-                    full_url, json.dumps(body),
-                    {'Content-Type': 'application/json'})
-                urllib2.urlopen(req).read()
-            except Exception:
-                logging.exception("Error POSTing status update to service at %s",
-                                  full_url)
 
         if not jobstep_id:
             # TODO(dcramer): how does this happen?
             logging.error("Task %s is missing JobStep ID", status.task_id.value)
             return
 
-        # TODO(dcramer): when can we actually properly do deallocation?
-        # Relying on the lxc-wrapper to mark things as in_progress at least
-        # allows us to have a best-effort
         if state == 'finished':
-            api_request("/jobsteps/%s/" % jobstep_id, {"status": "finished"})
+            try:
+                self._changes_api.update_jobstep(jobstep_id, status="finished")
+            except APIError:
+                pass
         elif state in ('killed', 'lost', 'failed'):
             # Jobsteps are only intended to be executed once and should only exit non-zero or be
             # lost/killed by infrastructural issues, so we don't attempt to reschedule, and we mark
@@ -298,17 +355,15 @@ class ChangesScheduler(Scheduler):
             # Jobstep will necessarily stop executing, but it means that the results will be
             # considered immediately invalid.
             logging.warn('Task %s %s: %s', jobstep_id, state, status.message)
-
-            api_request(
-                url='/jobsteps/%s/logappend/' % jobstep_id,
-                body={
-                    'text': '==> Scheduler marked task as %s (will NOT be retried):\n\n%s' % (
-                        state, status.message),
-                    'source': 'console',
-                }
-            )
-
-            api_request("/jobsteps/%s/" % jobstep_id, {"status": "finished", "result": "infra_failed"})
+            msg = '==> Scheduler marked task as %s (will NOT be retried):\n\n%s' % (state, status.message)
+            try:
+                self._changes_api.jobstep_console_append(jobstep_id, text=msg)
+            except APIError:
+                pass
+            try:
+                self._changes_api.update_jobstep(jobstep_id, status="finished", result="infra_failed")
+            except APIError:
+                pass
 
     def frameworkMessage(self, driver, executorId, slaveId, message):
         """
