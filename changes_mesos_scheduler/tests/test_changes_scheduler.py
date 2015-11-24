@@ -17,13 +17,13 @@ class ChangesSchedulerTest(TestCase):
         cs = ChangesScheduler('changes url', test_dir, state_file)
         cs.tasksLaunched = 5
         cs.tasksFinished = 3
-        cs.taskJobStepMapping['task x'] = ['jobstep x']
+        cs.taskJobStepMapping['task x'] = 'jobstep x'
         cs.save_state()
 
         cs2 = ChangesScheduler('changes url', test_dir, state_file)
         assert 5 == cs2.tasksLaunched
         assert 3 == cs2.tasksFinished
-        assert {'task x': ['jobstep x']} == cs2.taskJobStepMapping
+        assert {'task x': 'jobstep x'} == cs2.taskJobStepMapping
         assert not os.path.exists(state_file)
 
     def test_blacklist(self):
