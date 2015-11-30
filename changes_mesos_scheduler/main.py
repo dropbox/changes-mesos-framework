@@ -130,7 +130,7 @@ def main():
     parser.add_argument('--config-dir', default=DEFAULT_CONFIG_DIR, help='Configuration directory')
     parser.add_argument('--state-file', default=None, help='File path preserve state across restarts')
     parser.add_argument('--statsd-host', default=None, help='Host to report stats to')
-    parser.add_argument('--statsd-port', default=8125, help='Port for on statsd host to send to')
+    parser.add_argument('--statsd-port', default=8125, type=int, help='Port for on statsd host to send to')
     parser.add_argument('--statsd-prefix', default='changes_scheduler', help='Prefix for stats keys')
 
     args = parser.parse_args(sys.argv[1:])
