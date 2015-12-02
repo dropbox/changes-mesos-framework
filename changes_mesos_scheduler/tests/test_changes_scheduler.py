@@ -5,6 +5,11 @@ import mock
 
 from unittest import TestCase
 
+try:
+    from mesos.interface import mesos_pb2
+except ImportError:
+    import mesos_pb2
+
 from changes_scheduler import ChangesScheduler, APIError
 
 
@@ -59,24 +64,21 @@ class ChangesSchedulerTest(TestCase):
         cs = ChangesScheduler(test_dir, 'nostatefile', api=api)
         driver = mock.Mock()
 
-        offer = mock.Mock()
-        offer.id.value = '999'
-        offer.hostname = 'hostname'
-        offer.framework_id.value = 'fwkid'
-        offer.slave_id.value = 'slaveid'
-        # Fill in enough values to make the dict generation not fail.
-        offer.attributes = []
-        offer.resources = {}
-        offer.executor_ids = []
+        offer = mesos_pb2.Offer(
+            id=mesos_pb2.OfferID(value="offerid"),
+            framework_id=mesos_pb2.FrameworkID(value="frameworkid"),
+            slave_id=mesos_pb2.SlaveID(value="slaveid"),
+            hostname='hostname',
+        )
+        offer.resources.add(name="cpus",
+                            type=mesos_pb2.Value.SCALAR,
+                            scalar=mesos_pb2.Value.Scalar(value=4))
+        offer.resources.add(name="mem",
+                            type=mesos_pb2.Value.SCALAR,
+                            scalar=mesos_pb2.Value.Scalar(value=8192))
         cs.resourceOffers(driver, [offer])
 
         api.allocate_jobsteps.assert_called_once_with({
-                "attributes": [],
-                "executor_ids": [],
-                "framework_id": 'fwkid',
-                "hostname": 'hostname',
-                "id": '999',
-                "resources": {},
-                "slave_id": 'slaveid',
+                "resources": {"cpus": 4, "mem": 8192},
         })
         driver.declineOffer.assert_called_once_with(offer.id)

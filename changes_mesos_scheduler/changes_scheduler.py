@@ -234,15 +234,9 @@ class ChangesScheduler(Scheduler):
 
             # protobuf -> dict
             info = {
-                "attributes": [ChangesScheduler._decode_attribute(a) for a in offer.attributes],
-                "executor_ids": [ei.value for ei in offer.executor_ids],
-                "framework_id": offer.framework_id.value,
-                "hostname": offer.hostname,
-                "id": offer.id.value,
                 "resources": {name: value
                               for (name, value)
                               in [ChangesScheduler._decode_resource(r) for r in offer.resources]},
-                "slave_id": offer.slave_id.value,
             }
             logging.debug("Offer: %s", json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
 
@@ -277,9 +271,6 @@ class ChangesScheduler(Scheduler):
 
                 task.command.value = cmd
                 logging.debug("Scheduling cmd: %s", cmd)
-
-                # task.executor.MergeFrom(self.executor)
-                # task.executor.data = task_to_run["cmd"].encode("utf-8")
 
                 cpus = task.resources.add()
                 cpus.name = "cpus"
