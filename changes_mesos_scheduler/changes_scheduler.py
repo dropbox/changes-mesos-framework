@@ -178,13 +178,13 @@ class ChangesScheduler(Scheduler):
     @staticmethod
     def _decode_typed_field(pb):
         field_type = pb.type
-        if field_type == 0:  # Scalar
+        if field_type == mesos_pb2.Value.SCALAR:
             return pb.scalar.value
-        elif field_type == 1:  # Ranges
+        elif field_type == mesos_pb2.Value.RANGES:
             return [{"begin": ra.begin, "end": ra.end} for ra in pb.ranges.range]
-        elif field_type == 2:  # Set
+        elif field_type == mesos_pb2.Value.SET:
             return pb.set.item
-        elif field_type == 3:  # Text
+        elif field_type == mesos_pb2.Value.TEXT:
             return pb.text.value
         else:
             raise Exception("Unknown field type: %s", field_type)
