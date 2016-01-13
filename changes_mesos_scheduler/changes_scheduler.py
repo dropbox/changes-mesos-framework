@@ -37,7 +37,7 @@ class FileBlacklist(object):
     def _refresh(self):
         """Unconditionally refresh the blacklist from the file."""
         logging.info('Refreshing blacklist')
-        self._mtime = int(time.time())
+        self._mtime = os.path.getmtime(self._path)
         with open(self._path) as file:
             self._blacklist = set([s.strip() for s in file.readlines() if not s.startswith('#')])
 

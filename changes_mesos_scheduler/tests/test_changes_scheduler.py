@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 
 import mock
 
@@ -34,17 +35,33 @@ class ChangesSchedulerTest(TestCase):
     def test_blacklist(self):
         test_dir = tempfile.mkdtemp()
         state_file = test_dir + '/test.json'
-        blacklist = open(test_dir + '/blacklist', 'w+')
+        blpath = test_dir + '/blacklist'
+        # Ensure we have an empty blacklist file.
+        open(blpath, 'w+').close()
 
-        cs = ChangesScheduler(test_dir, state_file, api=mock.Mock())
-        driver = mock.Mock()
-        offer = mock.Mock()
-        offer.hostname = 'some_hostname.com'
-        offer.id = '999'
+        api = mock.MagicMock()
+        cs = ChangesScheduler(test_dir, state_file, api=api)
+        offer = mesos_pb2.Offer(
+            id=mesos_pb2.OfferID(value="offerid"),
+            framework_id=mesos_pb2.FrameworkID(value="frameworkid"),
+            slave_id=mesos_pb2.SlaveID(value="slaveid"),
+            hostname='some_hostname.com',
+        )
+
+        blacklist = open(test_dir + '/blacklist', 'w+')
         blacklist.write('some_hostname.com\n')
         blacklist.close()
-        cs.resourceOffers(driver, [offer])
+
+        driver = mock.Mock()
+        # We have to fake the mtime despite the file legitimately having been modified
+        # later because some filesystems (HFS+, for example) don't have enough precision
+        # for this to pass reliably.
+        with mock.patch('os.path.getmtime', return_value=time.time()+1) as getmtime:
+            cs.resourceOffers(driver, [offer])
+            getmtime.assert_called_with(blpath)
         driver.declineOffer.assert_called_once_with(offer.id)
+        assert api.allocate_jobsteps.call_count == 0
+
 
     def test_error_stats(self):
         test_dir = tempfile.mkdtemp()
