@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import time
 
@@ -11,36 +12,51 @@ try:
 except ImportError:
     import mesos_pb2
 
-from changes_scheduler import ChangesScheduler, APIError
+from changes_scheduler import ChangesScheduler, APIError, FileBlacklist
+
+
+def _noop_blacklist():
+    """Returns a blacklist instance that behaves like an empty blacklist."""
+    m = mock.Mock(spec=FileBlacklist)
+    m.contains.return_value = False
+    return m
 
 
 class ChangesSchedulerTest(TestCase):
-    def test_save_restore_state(self):
-        test_dir = tempfile.mkdtemp()
-        state_file = test_dir + '/test.json'
-        open(test_dir + '/blacklist', 'w+').close()
 
-        cs = ChangesScheduler(test_dir, state_file, api=mock.Mock())
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        super(ChangesSchedulerTest, self).setUp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+        super(ChangesSchedulerTest, self).tearDown()
+
+    def test_save_restore_state(self):
+        state_file = self.test_dir + '/test.json'
+
+        cs = ChangesScheduler(state_file, api=mock.Mock(),
+                              blacklist=_noop_blacklist())
         cs.tasksLaunched = 5
         cs.tasksFinished = 3
         cs.taskJobStepMapping['task x'] = 'jobstep x'
         cs.save_state()
 
-        cs2 = ChangesScheduler(test_dir, state_file, api=mock.Mock())
+        cs2 = ChangesScheduler(state_file, api=mock.Mock(),
+                               blacklist=_noop_blacklist())
         assert 5 == cs2.tasksLaunched
         assert 3 == cs2.tasksFinished
         assert {'task x': 'jobstep x'} == cs2.taskJobStepMapping
         assert not os.path.exists(state_file)
 
     def test_blacklist(self):
-        test_dir = tempfile.mkdtemp()
-        state_file = test_dir + '/test.json'
-        blpath = test_dir + '/blacklist'
+        blpath = self.test_dir + '/blacklist'
         # Ensure we have an empty blacklist file.
         open(blpath, 'w+').close()
 
         api = mock.MagicMock()
-        cs = ChangesScheduler(test_dir, state_file, api=api)
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=FileBlacklist(blpath))
         offer = mesos_pb2.Offer(
             id=mesos_pb2.OfferID(value="offerid"),
             framework_id=mesos_pb2.FrameworkID(value="frameworkid"),
@@ -48,7 +64,7 @@ class ChangesSchedulerTest(TestCase):
             hostname='some_hostname.com',
         )
 
-        blacklist = open(test_dir + '/blacklist', 'w+')
+        blacklist = open(blpath, 'w+')
         blacklist.write('some_hostname.com\n')
         blacklist.close()
 
@@ -64,21 +80,18 @@ class ChangesSchedulerTest(TestCase):
 
 
     def test_error_stats(self):
-        test_dir = tempfile.mkdtemp()
-        open(test_dir + '/blacklist', 'w+').close()
-
         stats = mock.Mock()
-        cs = ChangesScheduler(test_dir, 'nostatefile', api=mock.Mock(), stats=stats)
+        cs = ChangesScheduler(state_file=None, api=mock.Mock(), stats=stats,
+                              blacklist=_noop_blacklist())
         driver = mock.Mock()
         cs.error(driver, 'message')
         stats.incr.assert_called_once_with('errors')
 
     def test_api_error(self):
-        test_dir = tempfile.mkdtemp()
-        open(test_dir + '/blacklist', 'w+').close()
         api = mock.Mock(spec_set=["allocate_jobsteps"])
         api.allocate_jobsteps.side_effect = APIError("Failure")
-        cs = ChangesScheduler(test_dir, 'nostatefile', api=api)
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
         driver = mock.Mock()
 
         offer = mesos_pb2.Offer(

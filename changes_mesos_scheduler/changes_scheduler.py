@@ -113,12 +113,12 @@ class ChangesAPI(object):
 
 
 class ChangesScheduler(Scheduler):
-    def __init__(self, config_dir, state_file, api, stats=None):
+    def __init__(self, state_file, api, blacklist, stats=None):
         """
         Args:
-            config_dir (str): Directory in which we'll find the blacklist.
             state_file (str): Path where serialized internal state will be stored.
             api (ChangesAPI): API to use for interacting with Changes.
+            blacklist (FileBlacklist): Blacklist to use.
             stats (statsreporter.Stats): Optional Stats instance to use.
         """
         self.framework_id = None
@@ -129,7 +129,7 @@ class ChangesScheduler(Scheduler):
         self.shuttingDown = Event()
         # Use the provided Stats or create a no-op one.
         self._stats = stats or statsreporter.Stats(None)
-        self._blacklist = FileBlacklist(os.path.join(config_dir, 'blacklist'))
+        self._blacklist = blacklist
         # Refresh now so that if it fails, it fails at startup.
         self._blacklist.refresh()
         self.state_file = state_file
