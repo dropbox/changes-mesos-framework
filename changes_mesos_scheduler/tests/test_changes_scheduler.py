@@ -112,3 +112,78 @@ class ChangesSchedulerTest(TestCase):
                 "resources": {"cpus": 4, "mem": 8192},
         })
         driver.declineOffer.assert_called_once_with(offer.id)
+
+    def test_api_no_tasks(self):
+        api = mock.Mock(spec_set=["allocate_jobsteps"])
+        api.allocate_jobsteps.return_value = []
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        offer = mesos_pb2.Offer(
+            id=mesos_pb2.OfferID(value="offerid"),
+            framework_id=mesos_pb2.FrameworkID(value="frameworkid"),
+            slave_id=mesos_pb2.SlaveID(value="slaveid"),
+            hostname='hostname',
+        )
+        offer.resources.add(name="cpus",
+                            type=mesos_pb2.Value.SCALAR,
+                            scalar=mesos_pb2.Value.Scalar(value=4))
+        offer.resources.add(name="mem",
+                            type=mesos_pb2.Value.SCALAR,
+                            scalar=mesos_pb2.Value.Scalar(value=8192))
+        offer.attributes.add(name="labels",
+                             type=mesos_pb2.Value.TEXT,
+                             text=mesos_pb2.Value.Text(value="foo_cluster"))
+
+        cs.resourceOffers(driver, [offer])
+
+        api.allocate_jobsteps.assert_called_once_with({
+                "resources": {"cpus": 4, "mem": 8192},
+                "cluster": "foo_cluster",
+        })
+        driver.declineOffer.assert_called_once_with(offer.id)
+
+    def test_api_one_task(self):
+        api = mock.Mock(spec_set=["allocate_jobsteps"])
+        api.allocate_jobsteps.return_value = [{'project': {'slug': 'foo'}, 'id': '1',
+                                               'cmd': 'ls', 'resources': {'cpus': 2, 'mem': 4096}}]
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        offer = mesos_pb2.Offer(
+            id=mesos_pb2.OfferID(value="offerid"),
+            framework_id=mesos_pb2.FrameworkID(value="frameworkid"),
+            slave_id=mesos_pb2.SlaveID(value="slaveid"),
+            hostname='hostname',
+        )
+        offer.resources.add(name="cpus",
+                            type=mesos_pb2.Value.SCALAR,
+                            scalar=mesos_pb2.Value.Scalar(value=4))
+        offer.resources.add(name="mem",
+                            type=mesos_pb2.Value.SCALAR,
+                            scalar=mesos_pb2.Value.Scalar(value=8192))
+        offer.attributes.add(name="labels",
+                             type=mesos_pb2.Value.TEXT,
+                             text=mesos_pb2.Value.Text(value="foo_cluster"))
+        def check_tasks(offer_id, tasks):
+            assert offer_id == offer.id
+            assert len(tasks) == 1
+            assert tasks[0].name == 'foo 1'
+            assert tasks[0].slave_id.value == offer.slave_id.value
+            assert tasks[0].command.value == 'ls'
+            assert tasks[0].resources[0].name == "cpus"
+            assert tasks[0].resources[0].scalar.value == 2
+            assert tasks[0].resources[1].name == "mem"
+            assert tasks[0].resources[1].scalar.value == 4096
+        driver.launchTasks.side_effect = check_tasks
+
+        cs.resourceOffers(driver, [offer])
+
+        api.allocate_jobsteps.assert_called_once_with({
+                "resources": {"cpus": 4, "mem": 8192},
+                "cluster": "foo_cluster",
+        })
+        assert driver.launchTasks.call_count == 1
+        assert cs.tasksLaunched == 1

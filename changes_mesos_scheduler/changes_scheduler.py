@@ -193,7 +193,7 @@ class ChangesScheduler(Scheduler):
 
     @staticmethod
     def _decode_attribute(attr_pb):
-        return {attr_pb.name: ChangesScheduler._decode_typed_field(attr_pb)}
+        return (attr_pb.name, ChangesScheduler._decode_typed_field(attr_pb))
 
     @staticmethod
     def _decode_resource(resource_pb):
@@ -240,6 +240,9 @@ class ChangesScheduler(Scheduler):
                               for (name, value)
                               in [ChangesScheduler._decode_resource(r) for r in offer.resources]},
             }
+            attributes = dict([ChangesScheduler._decode_attribute(a) for a in offer.attributes])
+            if 'labels' in attributes:
+                info['cluster'] = attributes['labels']
             logging.debug("Offer: %s", json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
 
             # hit service with our offer
