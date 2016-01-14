@@ -11,6 +11,8 @@ from changes_mesos_scheduler import statsreporter
 from threading import Event
 from uuid import uuid4
 
+from google.protobuf import text_format as _text_format
+
 try:
     from mesos.interface import Scheduler
     from mesos.interface import mesos_pb2
@@ -331,7 +333,8 @@ class ChangesScheduler(Scheduler):
 
         if not jobstep_id:
             # TODO(dcramer): how does this happen?
-            logging.error("Task %s is missing JobStep ID", status.task_id.value)
+            logging.error("Task %s is missing JobStep ID (state %s, message %s)", status.task_id.value, state, 
+                          _text_format.MessageToString(status))
             return
 
         if state == 'finished':
