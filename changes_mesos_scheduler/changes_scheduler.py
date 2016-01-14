@@ -89,7 +89,7 @@ class ChangesAPI(object):
         Returns:
             list: List of JobSteps to allocate.
         """
-        return self._api_request("/jobsteps/allocate", info)
+        return self._api_request("/jobsteps/allocate/", info)
 
     def update_jobstep(self, jobstep_id, status, result=None):
         """ Update the recorded status and possibly result of a JobStep in Changes.
