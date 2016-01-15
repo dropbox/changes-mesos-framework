@@ -23,6 +23,12 @@ cd /vagrant
 make test
 ```
 
+You can also run tests locally (on your host machine). You need to install
+mesos (`brew install mesos` on Mac), and may need to `sudo pip install mesos`
+too. After that `make test` should work (mileage may vary, this is only really
+tested on Mac).
+
+
 Running the scheduler requires having mesos set up and running but this vagrant VM is not set up to do that yet. You can instead use a different one:
 
 ```shell
