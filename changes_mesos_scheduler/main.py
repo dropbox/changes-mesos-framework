@@ -58,8 +58,9 @@ def run(api_url, mesos_master, user, config_dir, state_file, stats=None):
     framework.user = user
     framework.name = "Changes Scheduler"
     framework.principal = "changes"
-    # Give the scheduler 30s to restart before mesos cancels the tasks.
-    framework.failover_timeout = 30
+    # Give the scheduler 1 week to restart before mesos cancels the tasks.
+    # this is the setting recommended by the docs.
+    framework.failover_timeout = 3600 * 24 * 7
 
     if scheduler.framework_id:
         framework.id.value = scheduler.framework_id
