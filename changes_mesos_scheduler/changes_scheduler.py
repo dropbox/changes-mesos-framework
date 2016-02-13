@@ -9,7 +9,6 @@ import urllib2
 from changes_mesos_scheduler import statsreporter
 
 from threading import Event
-from urlparse import urljoin
 from uuid import uuid4
 
 from google.protobuf import text_format as _text_format
@@ -67,10 +66,17 @@ class ChangesAPI(object):
     def __init__(self, api_url):
         self._api_url = api_url
 
-    def _api_request(self, path, body):
+    @staticmethod
+    def url_path_join(url, path):
         # Changes insists that paths end with a slash
         path = path if path.endswith('/') else path + '/'
-        full_url = urljoin(self._api_url, path)
+        # Make sure there's exactly one slash between path and the API url
+        path = path if path.startswith('/') else '/' + path
+        url = url.rstrip('/')
+        return url + path
+
+    def _api_request(self, path, body):
+        full_url = ChangesAPI.url_path_join(self._api_url, path)
         try:
             req = urllib2.Request(
                 full_url, json.dumps(body),

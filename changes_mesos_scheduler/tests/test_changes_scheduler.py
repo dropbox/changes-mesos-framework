@@ -12,7 +12,7 @@ try:
 except ImportError:
     import mesos_pb2
 
-from changes_scheduler import ChangesScheduler, APIError, FileBlacklist
+from changes_scheduler import ChangesScheduler, APIError, FileBlacklist, ChangesAPI
 
 
 def _noop_blacklist():
@@ -20,6 +20,18 @@ def _noop_blacklist():
     m = mock.Mock(spec=FileBlacklist)
     m.contains.return_value = False
     return m
+
+
+class ChangesAPITest(TestCase):
+
+    def test_url_path_join(self):
+        url = 'https://changes.com/api/0'
+        desired = 'https://changes.com/api/0/jobsteps/allocate/'
+        assert ChangesAPI.url_path_join(url, '/jobsteps/allocate/') == desired
+        assert ChangesAPI.url_path_join(url, 'jobsteps/allocate') == desired
+        assert ChangesAPI.url_path_join(url + '/', 'jobsteps/allocate') == desired
+        assert ChangesAPI.url_path_join(url + '/', '/jobsteps/allocate') == desired
+        assert ChangesAPI.url_path_join(url + '//', '/jobsteps/allocate') == desired
 
 
 class ChangesSchedulerTest(TestCase):
