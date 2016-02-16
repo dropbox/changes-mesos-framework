@@ -12,7 +12,7 @@ try:
 except ImportError:
     import mesos_pb2
 
-from changes_scheduler import ChangesScheduler, APIError, FileBlacklist, ChangesAPI
+from changes_mesos_scheduler.changes_scheduler import ChangesScheduler, APIError, FileBlacklist, ChangesAPI
 
 
 def _noop_blacklist():

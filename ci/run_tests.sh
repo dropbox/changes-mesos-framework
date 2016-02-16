@@ -1,6 +1,3 @@
 #!/bin/bash -eux
 
-
-make coverage
-
-make deb
+make virtualenv_coverage

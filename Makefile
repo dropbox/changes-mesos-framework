@@ -4,17 +4,33 @@ VERSION = 0.0.2
 # E.g., 1438708515-753e183
 REV=`git show -s --format=%ct-%h HEAD`
 
+DEB_VERSION = "$(VERSION)-$(REV)"
+
 test:
-	PYTHONPATH=changes_mesos_scheduler py.test changes_mesos_scheduler/tests/
+	py.test changes_mesos_scheduler/tests/
 
 install-test-requirements:
-		pip install "file://`pwd`#egg=changes-mesos-scheduler[tests]"
+	pip install "file://`pwd`#egg=changes-mesos-scheduler[tests]"
 
 coverage:
-		PYTHONPATH=changes_mesos_scheduler coverage run -m py.test --junitxml=python.junit.xml changes_mesos_scheduler/tests/
-		PYTHONPATH=changes_mesos_scheduler coverage xml
+	coverage run -m py.test --junitxml=python.junit.xml changes_mesos_scheduler/tests/
+	coverage xml
 
-deb:
-	fpm --no-python-fix-name -n $(PKG_NAME) -v "$(VERSION)-$(REV)" -s python -t deb setup.py
+virtualenv:
+	./make_virtualenv.sh $(PKG_NAME)
+
+deb: virtualenv
+	fpm -f -t deb -s dir -C build -n $(PKG_NAME) -v $(DEB_VERSION) .
+
+install_deb: deb
+	sudo dpkg -i "$(PKG_NAME)_$(DEB_VERSION)_amd64.deb"
+
+virtualenv_coverage: install_deb
+	. /usr/share/python/$(PKG_NAME)/bin/activate; \
+	make coverage
+
+virtualenv_test: install_deb
+	. /usr/share/python/$(PKG_NAME)/bin/activate; \
+	make test
 
 .PHONY: deb
