@@ -44,9 +44,10 @@ def install_sentry_logger():
     setup_logging(handler)
 
 
-def run(api_url, mesos_master, user, config_dir, state_file, stats=None):
+def run(api_url, mesos_master, user, config_dir, state_file, changes_request_limit, stats=None):
     scheduler = ChangesScheduler(state_file, api=ChangesAPI(api_url), stats=stats,
-                                 blacklist=FileBlacklist(os.path.join(config_dir, 'blacklist')))
+                                 blacklist=FileBlacklist(os.path.join(config_dir, 'blacklist')),
+                                 changes_request_limit=changes_request_limit)
 
     executor = mesos_pb2.ExecutorInfo()
     executor.executor_id.value = "default"
@@ -134,6 +135,8 @@ def main():
     parser.add_argument('--statsd-host', default=None, help='Host to report stats to')
     parser.add_argument('--statsd-port', default=8125, type=int, help='Port for on statsd host to send to')
     parser.add_argument('--statsd-prefix', default='changes_scheduler', help='Prefix for stats keys')
+    parser.add_argument('--changes-request-limit', default=200, type=int,
+                        help='Maximum number of JobSteps to ask Changes for per-request')
 
     args = parser.parse_args(sys.argv[1:])
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
@@ -148,7 +151,7 @@ def main():
         }).stats()
 
     try:
-        run(args.api_url, args.mesos_master, args.user, args.config_dir, args.state_file, stats)
+        run(args.api_url, args.mesos_master, args.user, args.config_dir, args.state_file, args.changes_request_limit, stats)
     except Exception as e:
         logging.exception(unicode(e))
         raise

@@ -1,5 +1,6 @@
 from __future__ import absolute_import, print_function
 
+import bisect
 import json
 import logging
 import os
@@ -8,7 +9,9 @@ import urllib2
 
 from changes_mesos_scheduler import statsreporter
 
+from collections import defaultdict
 from threading import Event
+from urllib import urlencode
 from uuid import uuid4
 
 from google.protobuf import text_format as _text_format
@@ -78,8 +81,9 @@ class ChangesAPI(object):
     def _api_request(self, path, body):
         full_url = ChangesAPI.url_path_join(self._api_url, path)
         try:
+            data = json.dumps(body) if body else None
             req = urllib2.Request(
-                full_url, json.dumps(body),
+                full_url, data,
                 {'Content-Type': 'application/json'})
             # Any connectivity issues will raise an exception, as will some error statuses.
             content = urllib2.urlopen(req).read()
@@ -89,16 +93,35 @@ class ChangesAPI(object):
             logging.exception("Error POSTing to Changes at %s", full_url)
             raise APIError("Error POSTing to Changes at %s" % full_url, exc)
 
-    def allocate_jobsteps(self, info):
-        """ Given resource constraints for a slave, return a list of JobSteps to run on it.
+    def get_allocate_jobsteps(self, limit=None, cluster=None):
+        """ Returns a list of up to `limit` pending allocation jobsteps in `cluster`.
+            The scheduler may then allocate these as it sees fit.
 
         Args:
-            info (dict): Dictionary of offer info.
+            limit (Optional[int]): maximum jobsteps to return
+            cluster (Optional[str]): cluster to look in. The "default" cluster
+                returns jobsteps with no cluster specified.
 
         Returns:
-            list: List of JobSteps to allocate.
+            list: List of JobSteps (in priority order) that are pending allocation
         """
-        return self._api_request("/jobsteps/allocate/", info)
+        data = {'limit': limit} if limit else {}
+        if cluster:
+            data['cluster'] = cluster
+        query_string = '?' + urlencode(data) if data else ''
+        return self._api_request("/jobsteps/allocate/" + query_string)['jobsteps']
+
+    def post_allocate_jobsteps(self, jobstep_ids, cluster=None):
+        """ Attempt to allocate the given list of JobStep ids.
+
+        Args:
+            jobstep_ids (list): list of JobStep ID hexs to allocate.
+            cluster (Optional[str]): cluster to allocate in.
+        """
+        data = {'jobstep_ids': jobstep_ids}
+        if cluster:
+            data['cluster'] = cluster
+        return self._api_request("/jobsteps/allocate/", data)['allocated']
 
     def update_jobstep(self, jobstep_id, status, result=None):
         """ Update the recorded status and possibly result of a JobStep in Changes.
@@ -124,7 +147,7 @@ class ChangesAPI(object):
 
 
 class ChangesScheduler(Scheduler):
-    def __init__(self, state_file, api, blacklist, stats=None):
+    def __init__(self, state_file, api, blacklist, stats=None, changes_request_limit=200):
         """
         Args:
             state_file (str): Path where serialized internal state will be stored.
@@ -144,6 +167,7 @@ class ChangesScheduler(Scheduler):
         # Refresh now so that if it fails, it fails at startup.
         self._blacklist.refresh()
         self.state_file = state_file
+        self.changes_request_limit = changes_request_limit
 
         # Restore state from a previous run
         if not self.state_file:
@@ -212,7 +236,159 @@ class ChangesScheduler(Scheduler):
     def activeTasks(self):
         return self.tasksFinished - self.tasksLaunched
 
-    def resourceOffers(self, driver, offers):
+    @staticmethod
+    def get_cluster(offer):
+        attributes = dict([ChangesScheduler._decode_attribute(a) for a in offer.attributes])
+        return attributes.get('labels')
+
+    @staticmethod
+    def get_resources(offer):
+        return {name: value for (name, value) in
+                [ChangesScheduler._decode_resource(r) for r in offer.resources]}
+
+    class OfferWrapper(object):
+        """ Wrapper around a protobuf Offer object. Provides numerous
+        conveniences including comparison (we currently use a least loaded
+        approach), and being able to assign jobsteps to the offer.
+        """
+        def __init__(self, offer):
+            self.offer = offer
+            self.reset_state()
+
+        def reset_state(self):
+            resources = ChangesScheduler.get_resources(self.offer)
+            self.cpus = resources['cpus']
+            self.memory = resources['mem']
+            self.jobsteps = []
+
+        def __cmp__(self, other):
+            # we prioritize first by cpu then memory.
+            # (values are negated so more resources sorts as "least loaded")
+            us = (-self.cpus, -self.memory)
+            them = (-other.cpus, -other.memory)
+            if us < them:
+                return -1
+            return 0 if us == them else 1
+
+        def cluster(self):
+            return ChangesScheduler.get_cluster(self.offer)
+
+        def has_resources_for(self, jobstep):
+            return self.cpus >= jobstep['resources']['cpus'] and self.memory >= jobstep['resources']['mem']
+
+        def commit_resources_for(self, jobstep):
+            assert self.has_resources_for(jobstep)
+            self.cpus -= jobstep['resources']['cpus']
+            self.memory -= jobstep['resources']['mem']
+
+        def has_resources(self):
+            return self.cpus > 0 and self.memory > 0
+
+        def add_jobstep(self, jobstep):
+            self.commit_resources_for(jobstep)
+            self.jobsteps.append(jobstep)
+
+        def remove_all_jobsteps(self):
+            self.reset_state()
+
+    def _jobstep_to_task(self, offer, jobstep):
+        """ Given a jobstep and an offer to assign it to, returns the TaskInfo
+        protobuf for the jobstep and updates scheduler state accordingly.
+        """
+        tid = uuid4().hex
+        self.tasksLaunched += 1
+
+        logging.info("Accepting offer on %s to start task %s", offer.hostname, tid)
+
+        task = mesos_pb2.TaskInfo()
+        task.name = "{} {}".format(
+            jobstep['project']['slug'],
+            jobstep['id'],
+        )
+        task.task_id.value = str(tid)
+        task.slave_id.value = offer.slave_id.value
+
+        cmd = jobstep["cmd"]
+
+        task.command.value = cmd
+        logging.debug("Scheduling cmd: %s", cmd)
+
+        cpus = task.resources.add()
+        cpus.name = "cpus"
+        cpus.type = mesos_pb2.Value.SCALAR
+        cpus.scalar.value = jobstep["resources"]["cpus"]
+
+        mem = task.resources.add()
+        mem.name = "mem"
+        mem.type = mesos_pb2.Value.SCALAR
+        mem.scalar.value = jobstep["resources"]["mem"]
+
+        self.taskJobStepMapping[task.task_id.value] = jobstep['id']
+
+        return task
+
+    def _assign_jobsteps(self, cluster, offers):
+        """ Attempts to schedule as many jobsteps as possible (using a least
+        loaded approach) on the given set of offers.
+
+         Args:
+            cluster (string): The cluster of the offers in question (could be
+                the None cluster)
+            offers (list[OfferWrapper]): list of currently available offers
+        """
+        # TODO(nate): may want to do this POST in a loop (til there are no
+        # jobsteps or we've filled our offers), so there's no 5s delay in scheduling many jobsteps
+        try:
+            possible_jobsteps = self._changes_api.get_allocate_jobsteps(limit=self.changes_request_limit, cluster=cluster)
+        except APIError:
+            logging.warning('/jobstep/allocate/ GET failed for cluster: %s', cluster, exc_info=True)
+            possible_jobsteps = []
+        if not possible_jobsteps:
+            return
+        to_allocate = []
+        # Changes returns JobSteps in priority order, so for each one
+        # we attempt to put it on the machine with the least current load that
+        # still has sufficient resources for it. This is not necessarily an
+        # optimal algorithm--it might allocate fewer jobsteps than is possible,
+        # and it currently prioritizes cpu over memory. We don't believe this 
+        # to be an issue currently, but it may be worth improving in the future
+        sorted_offers = sorted(offers)
+        for jobstep in possible_jobsteps:
+            if len(sorted_offers) == 0:
+                break
+            offer_to_use = None
+            # this gives us the least-loaded offer that we could actually use for this jobstep
+            # (we iterate in reverse because offers are sorted by number of resources)
+            for offer in sorted_offers:
+                if offer.has_resources_for(jobstep):
+                    offer_to_use = offer
+                    break
+
+            # couldn't find any offers that would support this jobstep, move on
+            if not offer_to_use:
+                continue
+
+            sorted_offers.remove(offer_to_use)
+            offer_to_use.add_jobstep(jobstep)
+            to_allocate.append(jobstep['id'])
+            if offer_to_use.has_resources():
+                bisect.insort(sorted_offers, offer_to_use)
+
+        if not to_allocate:
+            return
+
+        try:
+            allocated_ids = self._changes_api.post_allocate_jobsteps(to_allocate, cluster=cluster)
+        except APIError:
+            allocated_ids = []
+        if sorted(allocated_ids) != sorted(to_allocate):
+            # NB: cluster could be None here
+            logging.warning("Could not successfully allocate for cluster: %s", cluster)
+            # for now we just give up on this cluster entirely
+            for offer in offers:
+                offer.remove_all_jobsteps()
+
+    def resourceOffers(self, driver, pb_offers):
         """
           Invoked when resources have been offered to this framework. A single
           offer will only contain resources from a single slave.  Resources
@@ -227,79 +403,42 @@ class ChangesScheduler(Scheduler):
           framework has already launched tasks with those resources then those
           tasks will fail with a TASK_LOST status and a message saying as much).
         """
-        logging.info("Got %d resource offers", len(offers))
-        self._stats.incr('offers', len(offers))
+        logging.info("Got %d resource offers", len(pb_offers))
+        self._stats.incr('offers', len(pb_offers))
 
         self._blacklist.refresh()
 
+        def decline(to_decline, reason_func):
+            for pb_offer in to_decline:
+                if reason_func:
+                    logging.info(reason_func(pb_offer))
+                driver.declineOffer(pb_offer.id)
+
+        if self.shuttingDown.is_set():
+            decline(pb_offers, lambda pb_offer: "Shutting down, declining offer: %s" % pb_offer.id)
+            return
+
+        blacklisted = [pb_offer for pb_offer in pb_offers if self._blacklist.contains(pb_offer.hostname)]
+        pb_offers = [pb_offer for pb_offer in pb_offers if not self._blacklist.contains(pb_offer.hostname)]
+        decline(blacklisted, lambda pb_offer: "Declining offer from blacklisted hostname: %s" % pb_offer.hostname)
+
+        offers = [ChangesScheduler.OfferWrapper(pb_offer) for pb_offer in pb_offers]
+        offers_for_cluster = defaultdict(list)
         for offer in offers:
-            if self.shuttingDown.is_set():
-                logging.info("Shutting down, declining offer: %s", offer.id)
-                driver.declineOffer(offer.id)
+            offers_for_cluster[offer.cluster()].append(offer)
+
+        for cluster, cluster_offers in offers_for_cluster.iteritems():
+            self._assign_jobsteps(cluster, cluster_offers)
+
+        # we've allocated all the jobsteps we can, now we launch them
+        for offer in offers:
+            if len(offer.jobsteps) == 0:
+                logging.info("No tasks to run, declining offer: %s", offer.offer.id)
+                driver.declineOffer(offer.offer.id)
                 continue
 
-            if self._blacklist.contains(offer.hostname):
-                logging.info("Declining offer from blacklisted hostname: %s", offer.hostname)
-                driver.declineOffer(offer.id)
-                continue
-
-            # protobuf -> dict
-            info = {
-                "resources": {name: value
-                              for (name, value)
-                              in [ChangesScheduler._decode_resource(r) for r in offer.resources]},
-            }
-            attributes = dict([ChangesScheduler._decode_attribute(a) for a in offer.attributes])
-            if 'labels' in attributes:
-                info['cluster'] = attributes['labels']
-            logging.debug("Offer: %s", json.dumps(info, sort_keys=True, indent=2, separators=(',', ': ')))
-
-            # hit service with our offer
-            try:
-                tasks_to_run = self._changes_api.allocate_jobsteps(info)
-            except APIError:
-                driver.declineOffer(offer.id)
-                continue
-
-            if len(tasks_to_run) == 0:
-                logging.info("No tasks to run, declining offer: %s", offer.id)
-                driver.declineOffer(offer.id)
-                continue
-
-            tasks = []
-            for task_to_run in tasks_to_run:
-                tid = uuid4().hex
-                self.tasksLaunched += 1
-
-                logging.info("Accepting offer on %s to start task %s", offer.hostname, tid)
-
-                task = mesos_pb2.TaskInfo()
-                task.name = "{} {}".format(
-                    task_to_run['project']['slug'],
-                    task_to_run['id'],
-                )
-                task.task_id.value = str(tid)
-                task.slave_id.value = offer.slave_id.value
-
-                cmd = task_to_run["cmd"]
-
-                task.command.value = cmd
-                logging.debug("Scheduling cmd: %s", cmd)
-
-                cpus = task.resources.add()
-                cpus.name = "cpus"
-                cpus.type = mesos_pb2.Value.SCALAR
-                cpus.scalar.value = task_to_run["resources"]["cpus"]
-
-                mem = task.resources.add()
-                mem.name = "mem"
-                mem.type = mesos_pb2.Value.SCALAR
-                mem.scalar.value = task_to_run["resources"]["mem"]
-
-                tasks.append(task)
-
-                self.taskJobStepMapping[task.task_id.value] = task_to_run['id']
-            driver.launchTasks(offer.id, tasks)
+            tasks = [self._jobstep_to_task(offer.offer, jobstep) for jobstep in offer.jobsteps]
+            driver.launchTasks(offer.offer.id, tasks)
 
     def offerRescinded(self, driver, offerId):
         """
