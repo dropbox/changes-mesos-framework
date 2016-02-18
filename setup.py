@@ -1,6 +1,6 @@
 from distutils.core import setup
 
-MESOS_VERSION = '0.20.0'
+MESOS_VERSION = '0.27.0'
 UBUNTU_VERSION = '14.04'
 
 tests_require = ['pytest>=2.5.0,<2.6.0', 'pytest-cov>=1.6,<1.7',
