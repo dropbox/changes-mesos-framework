@@ -109,7 +109,7 @@ class ChangesAPI(object):
         if cluster:
             data['cluster'] = cluster
         query_string = '?' + urlencode(data) if data else ''
-        return self._api_request("/jobsteps/allocate/" + query_string)['jobsteps']
+        return self._api_request("/jobsteps/allocate/" + query_string, None)['jobsteps']
 
     def post_allocate_jobsteps(self, jobstep_ids, cluster=None):
         """ Attempt to allocate the given list of JobStep ids.
