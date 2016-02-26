@@ -259,8 +259,8 @@ class ChangesScheduler(Scheduler):
 
         def reset_state(self):
             resources = ChangesScheduler.get_resources(self.offer)
-            self.cpus = resources['cpus']
-            self.memory = resources['mem']
+            self.cpus = resources.get('cpus', 0)
+            self.memory = resources.get('mem', 0)
             self.jobsteps = []
 
         def __cmp__(self, other):
@@ -406,6 +406,8 @@ class ChangesScheduler(Scheduler):
           tasks will fail with a TASK_LOST status and a message saying as much).
         """
         logging.info("Got %d resource offers", len(pb_offers))
+        for pb_offer in pb_offers:
+            logging.info("Got offer: %s", _text_format.MessageToString(pb_offer))
         self._stats.incr('offers', len(pb_offers))
 
         self._blacklist.refresh()

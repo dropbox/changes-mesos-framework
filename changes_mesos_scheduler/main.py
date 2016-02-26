@@ -139,7 +139,8 @@ def main():
                         help='Maximum number of JobSteps to ask Changes for per-request')
 
     args = parser.parse_args(sys.argv[1:])
-    logging.basicConfig(level=getattr(logging, args.log_level.upper()))
+    logging.basicConfig(level=getattr(logging, args.log_level.upper()),
+                        format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
     install_sentry_logger()
 
     stats = None
