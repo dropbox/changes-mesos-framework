@@ -78,8 +78,11 @@ class ChangesAPI(object):
         url = url.rstrip('/')
         return url + path
 
-    def _api_request(self, path, body):
+    def _api_request(self, path, body, get_params=dict()):
         full_url = ChangesAPI.url_path_join(self._api_url, path)
+        if get_params:
+            query_string = '?' + urlencode(get_params)
+            full_url = full_url + query_string
         try:
             data = json.dumps(body) if body else None
             req = urllib2.Request(
@@ -108,8 +111,7 @@ class ChangesAPI(object):
         data = {'limit': limit} if limit else {}
         if cluster:
             data['cluster'] = cluster
-        query_string = '?' + urlencode(data) if data else ''
-        return self._api_request("/jobsteps/allocate/" + query_string, None)['jobsteps']
+        return self._api_request("/jobsteps/allocate/", None, get_params=data)['jobsteps']
 
     def post_allocate_jobsteps(self, jobstep_ids, cluster=None):
         """ Attempt to allocate the given list of JobStep ids.
@@ -350,7 +352,7 @@ class ChangesScheduler(Scheduler):
         # we attempt to put it on the machine with the least current load that
         # still has sufficient resources for it. This is not necessarily an
         # optimal algorithm--it might allocate fewer jobsteps than is possible,
-        # and it currently prioritizes cpu over memory. We don't believe this 
+        # and it currently prioritizes cpu over memory. We don't believe this
         # to be an issue currently, but it may be worth improving in the future
         sorted_offers = sorted(offers)
         for jobstep in possible_jobsteps:
@@ -484,7 +486,7 @@ class ChangesScheduler(Scheduler):
 
         if not jobstep_id:
             # TODO(dcramer): how does this happen?
-            logging.error("Task %s is missing JobStep ID (state %s, message %s)", status.task_id.value, state, 
+            logging.error("Task %s is missing JobStep ID (state %s, message %s)", status.task_id.value, state,
                           _text_format.MessageToString(status))
             return
 
