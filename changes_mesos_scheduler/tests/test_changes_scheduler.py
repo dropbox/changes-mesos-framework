@@ -22,15 +22,21 @@ def _noop_blacklist():
 
 
 class ChangesAPITest(TestCase):
+    url = 'https://changes.com/api/0'
 
-    def test_url_path_join(self):
-        url = 'https://changes.com/api/0'
+    def test_make_url_paths(self):
         desired = 'https://changes.com/api/0/jobsteps/allocate/'
-        assert ChangesAPI.url_path_join(url, '/jobsteps/allocate/') == desired
-        assert ChangesAPI.url_path_join(url, 'jobsteps/allocate') == desired
-        assert ChangesAPI.url_path_join(url + '/', 'jobsteps/allocate') == desired
-        assert ChangesAPI.url_path_join(url + '/', '/jobsteps/allocate') == desired
-        assert ChangesAPI.url_path_join(url + '//', '/jobsteps/allocate') == desired
+        assert ChangesAPI.make_url(self.url, '/jobsteps/allocate/') == desired
+        assert ChangesAPI.make_url(self.url, 'jobsteps/allocate') == desired
+        assert ChangesAPI.make_url(self.url + '/', 'jobsteps/allocate') == desired
+        assert ChangesAPI.make_url(self.url + '/', '/jobsteps/allocate') == desired
+        assert ChangesAPI.make_url(self.url + '//', '/jobsteps/allocate') == desired
+
+    def test_make_url_query(self):
+        desired = ['https://changes.com/api/0/jobsteps/allocate/?foo=bar&baz=xyzz',
+                   'https://changes.com/api/0/jobsteps/allocate/?baz=xyzz&foo=bar']
+        full_url = ChangesAPI.make_url(self.url, '/jobsteps/allocate/', {'foo': 'bar', 'baz': 'xyzz'})
+        assert full_url in desired
 
 
 class ChangesSchedulerTest(TestCase):

@@ -70,19 +70,20 @@ class ChangesAPI(object):
         self._api_url = api_url
 
     @staticmethod
-    def url_path_join(url, path):
+    def make_url(base_url, path, get_params=None):
         # Changes insists that paths end with a slash
         path = path if path.endswith('/') else path + '/'
         # Make sure there's exactly one slash between path and the API url
         path = path if path.startswith('/') else '/' + path
-        url = url.rstrip('/')
-        return url + path
-
-    def _api_request(self, path, body, get_params=dict()):
-        full_url = ChangesAPI.url_path_join(self._api_url, path)
+        base_url = base_url.rstrip('/')
+        full_url = base_url + path
         if get_params:
             query_string = '?' + urlencode(get_params)
-            full_url = full_url + query_string
+            full_url += query_string
+        return full_url
+
+    def _api_request(self, path, body=None, get_params=None):
+        full_url = ChangesAPI.make_url(self._api_url, path, get_params)
         try:
             data = json.dumps(body) if body else None
             req = urllib2.Request(
@@ -111,7 +112,7 @@ class ChangesAPI(object):
         data = {'limit': limit} if limit else {}
         if cluster:
             data['cluster'] = cluster
-        return self._api_request("/jobsteps/allocate/", None, get_params=data)['jobsteps']
+        return self._api_request("/jobsteps/allocate/", get_params=data)['jobsteps']
 
     def post_allocate_jobsteps(self, jobstep_ids, cluster=None):
         """ Attempt to allocate the given list of JobStep ids.
