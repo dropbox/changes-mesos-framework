@@ -5,3 +5,4 @@ dist/
 *.deb
 /.vagrant/
 .idea
+setup.cfg
