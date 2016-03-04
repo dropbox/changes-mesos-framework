@@ -440,6 +440,23 @@ class ChangesScheduler(Scheduler):
             for offer in offers:
                 offer.remove_all_jobsteps()
 
+    @staticmethod
+    def _is_maintenanced(pb_offer, now_nanos):
+        if not pb_offer.HasField('unavailability'):
+            return False
+
+        start_time = pb_offer.unavailability.start.nanoseconds
+
+        # If "duration" is not present use a default value of anything greater
+        # than Now, to represent an unbounded maintenance time. Override this
+        # with an actual end time if the "duration" field is present in the
+        # protobuf.
+        end_time = now_nanos + 1
+        if (pb_offer.unavailability.HasField('duration')):
+            end_time = start_time + pb_offer.unavailability.duration.nanoseconds
+
+        return now_nanos > start_time and now_nanos < end_time
+
     def resourceOffers(self, driver, pb_offers):
         """
           Invoked when resources have been offered to this framework. A single
@@ -470,11 +487,20 @@ class ChangesScheduler(Scheduler):
             decline(pb_offers, lambda pb_offer: "Shutting down, declining offer: %s" % pb_offer.id)
             return
 
-        blacklisted = [pb_offer for pb_offer in pb_offers if self._blacklist.contains(pb_offer.hostname)]
-        pb_offers = [pb_offer for pb_offer in pb_offers if not self._blacklist.contains(pb_offer.hostname)]
+        now_nanos = int(time.time() * 1000000000)
+        maintenanced, blacklisted, usable = [], [], []
+        for pb_offer in pb_offers:
+            if ChangesScheduler._is_maintenanced(pb_offer, now_nanos):
+                maintenanced.append(pb_offer)
+            elif self._blacklist.contains(pb_offer.hostname):
+                blacklisted.append(pb_offer)
+            else:
+                usable.append(pb_offer)
+
+        decline(maintenanced, lambda pb_offer: "Declining offer from maintenanced hostname: %s" % pb_offer.hostname)
         decline(blacklisted, lambda pb_offer: "Declining offer from blacklisted hostname: %s" % pb_offer.hostname)
 
-        offers = [ChangesScheduler.OfferWrapper(pb_offer) for pb_offer in pb_offers]
+        offers = [ChangesScheduler.OfferWrapper(pb_offer) for pb_offer in usable]
         offers_for_cluster = defaultdict(list)
         for offer in offers:
             offers_for_cluster[offer.cluster()].append(offer)

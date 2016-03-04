@@ -56,13 +56,26 @@ class ChangesSchedulerTest(TestCase):
         shutil.rmtree(self.test_dir)
         super(ChangesSchedulerTest, self).tearDown()
 
-    def _make_offer(self, hostname='hostname', cpus=4, mem=8192, cluster=None, id='offerid'):
+    def _make_offer(self,
+                    hostname='hostname',
+                    cpus=4,
+                    mem=8192,
+                    cluster=None,
+                    id='offerid',
+                    unavailability_start_secs=None,
+                    unavailability_duration_secs=None):
         offer = mesos_pb2.Offer(
             id=mesos_pb2.OfferID(value=id),
             framework_id=mesos_pb2.FrameworkID(value="frameworkid"),
             slave_id=mesos_pb2.SlaveID(value="slaveid"),
             hostname=hostname,
         )
+
+        if unavailability_start_secs is not None:
+            offer.unavailability.start.nanoseconds = int(unavailability_start_secs * 1000000000)
+        if unavailability_duration_secs is not None:
+            offer.unavailability.duration.nanoseconds = int(unavailability_duration_secs * 1000000000)
+
         offer.resources.add(name="cpus",
                             type=mesos_pb2.Value.SCALAR,
                             scalar=mesos_pb2.Value.Scalar(value=cpus))
@@ -129,6 +142,100 @@ class ChangesSchedulerTest(TestCase):
         driver.declineOffer.assert_called_once_with(offer.id)
         assert api.allocate_jobsteps.call_count == 0
 
+
+    def test_blacklist_maintenance(self):
+        api = mock.Mock(spec=ChangesAPI)
+        now = time.time()
+        memlimit = 8192
+
+        # Test no unavailability scheduled - ACCEPT
+        offer1 = self._make_offer(hostname='hostname_1.com',
+                                  id="offer_1",
+                                  mem=memlimit)
+
+        # Test unavailability scheduled right now - DECLINE
+        offer2 = self._make_offer(hostname='hostname_2.com',
+                                  id="offer_2",
+                                  mem=memlimit,
+                                  unavailability_start_secs=now,
+                                  unavailability_duration_secs=10)
+
+        # Test unavailability scheduled in a few seconds - ACCEPT
+        offer3 = self._make_offer(hostname='hostname_3.com',
+                                  id="offer_3",
+                                  mem=memlimit,
+                                  unavailability_start_secs=now + 5,
+                                  unavailability_duration_secs=10)
+
+        # Test unavailability scheduled in the past, ending in the past - ACCEPT
+        offer4 = self._make_offer(hostname='hostname_5.com',
+                                  id="offer_4",
+                                  mem=memlimit,
+                                  unavailability_start_secs=now - 20,
+                                  unavailability_duration_secs=10)
+
+        # Test unavailability in progress - DECLINE
+        offer5 = self._make_offer(hostname='hostname_5.com',
+                                  id="offer_5",
+                                  mem=memlimit,
+                                  unavailability_start_secs=now - 5,
+                                  unavailability_duration_secs=10)
+
+        # Test past unavailability with no duration - DECLINE
+        offer6 = self._make_offer(hostname='hostname_6.com',
+                                  id="offer_6",
+                                  mem=memlimit,
+                                  unavailability_start_secs=now - 5,
+                                  unavailability_duration_secs=None)
+
+        # Test future unavailability with no duration - ACCEPT
+        offer7 = self._make_offer(hostname='hostname_7.com',
+                                  id="offer_7",
+                                  mem=memlimit,
+                                  unavailability_start_secs=now + 5,
+                                  unavailability_duration_secs=None)
+
+        # Test unavailability with zero duration - ACCEPT
+        offer8 = self._make_offer(hostname='hostname_8.com',
+                                  id="offer_8",
+                                  mem=memlimit,
+                                  unavailability_start_secs=now - 5,
+                                  unavailability_duration_secs=0)
+
+        all_offers = [offer1, offer2, offer3, offer4, offer5, offer6, offer7, offer8]
+        expected_launches = [offer1, offer3, offer4, offer7, offer8]
+        expected_declines = [offer2, offer5, offer6]
+
+        # To ensure that offers aren't accidentally declined due to a shortage
+        # of tasks, ensure tasks > offers so there's at least one tasks per
+        # machine, plus an extra. (each offer has memory for one task)
+        num_tasks = len(all_offers) + 1
+        tasks = []
+        for i in xrange(num_tasks):
+            tasks.append(self._make_changes_task(str(i), mem=memlimit))
+        api.get_allocate_jobsteps.return_value = tasks
+
+        # In practice, we end up with two tasks allocated per offer.
+        post_allocate_jobsteps_return = []
+        for i in xrange(len(expected_launches)):
+            post_allocate_jobsteps_return.append(str(i))
+        api.post_allocate_jobsteps.return_value = post_allocate_jobsteps_return
+
+        # Actually run the test logic.
+        cs = ChangesScheduler(state_file=None, api=api, blacklist=_noop_blacklist())
+        driver = mock.Mock()
+        cs.resourceOffers(driver, all_offers)
+
+        # Check that the maintenanced offers are declined.
+        for offer in expected_declines:
+            driver.declineOffer.assert_any_call(offer.id)
+        assert driver.declineOffer.call_count == len(expected_declines)
+
+        # Check that the non-maintenanced tasks are launched.
+        assert driver.launchTasks.call_count == len(expected_launches)
+        for launch_offer, args in zip(expected_launches,
+                                      driver.launchTasks.call_args_list):
+            assert args[0][0] == launch_offer.id
 
     def test_error_stats(self):
         stats = mock.Mock()
