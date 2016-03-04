@@ -6,3 +6,7 @@ dist/
 /.vagrant/
 .idea
 setup.cfg
+
+.coverage
+coverage.xml
+*junit.xml

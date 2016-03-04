@@ -171,6 +171,7 @@ class ChangesScheduler(Scheduler):
         self._blacklist.refresh()
         self.state_file = state_file
         self.changes_request_limit = changes_request_limit
+        self._snapshot_slave_map = defaultdict(lambda: defaultdict(float))
 
         # Restore state from a previous run
         if not self.state_file:
@@ -256,6 +257,7 @@ class ChangesScheduler(Scheduler):
         """
         def __init__(self, offer):
             self.offer = offer
+            self.hostname = offer.hostname
             self.reset_state()
 
         def reset_state(self):
@@ -294,6 +296,17 @@ class ChangesScheduler(Scheduler):
         def remove_all_jobsteps(self):
             self.reset_state()
 
+    def _get_slaves_for_snapshot(self, snapshot_id, recency_threshold_hours=12):
+        """ Returns list of hostnames which have run tasks with a given
+        snapshot_id recently.
+        """
+        latest_snapshot_use = time.time() - recency_threshold_hours * 3600
+        return [k for k, v in self._snapshot_slave_map[snapshot_id].iteritems()
+                if v >= latest_snapshot_use]
+
+    def _associate_snapshot_with_slave(self, snapshot_id, slave):
+        self._snapshot_slave_map[snapshot_id][slave] = time.time()
+
     def _jobstep_to_task(self, offer, jobstep):
         """ Given a jobstep and an offer to assign it to, returns the TaskInfo
         protobuf for the jobstep and updates scheduler state accordingly.
@@ -330,6 +343,16 @@ class ChangesScheduler(Scheduler):
 
         return task
 
+    @staticmethod
+    def _jobstep_snapshot(jobstep):
+        """ Given a jobstep, return its snapshot id if set, None otherwise.
+        """
+        if 'image' in jobstep and jobstep['image']:
+            if 'snapshot' in jobstep['image'] and jobstep['image']['snapshot']:
+                return jobstep['image']['snapshot']['id']
+
+        return None
+
     def _assign_jobsteps(self, cluster, offers):
         """ Attempts to schedule as many jobsteps as possible (using a least
         loaded approach) on the given set of offers.
@@ -348,6 +371,7 @@ class ChangesScheduler(Scheduler):
             possible_jobsteps = []
         if not possible_jobsteps:
             return
+
         to_allocate = []
         # Changes returns JobSteps in priority order, so for each one
         # we attempt to put it on the machine with the least current load that
@@ -360,18 +384,43 @@ class ChangesScheduler(Scheduler):
             if len(sorted_offers) == 0:
                 break
             offer_to_use = None
+
+            snapshot_id = self._jobstep_snapshot(jobstep)
+            # Disable proximity check if not using a snapshot or scheduling in an explicit cluster.
+            # Clusters are expected to pre-populate snapshots out of band and will not benefit
+            # from proximity checks.
+            if snapshot_id and not cluster:
+                logging.info('Scanning for slaves containing snapshot: %s', snapshot_id)
+
+                slaves_with_snapshot = self._get_slaves_for_snapshot(snapshot_id)
+                logging.info('Checking if any slaves known to have snapshot were offered: %s',
+                             slaves_with_snapshot)
+
+                if len(slaves_with_snapshot) > 0:
+                    for offer in sorted_offers:
+                        if offer.hostname in slaves_with_snapshot:
+                            if offer.has_resources_for(jobstep):
+                                offer_to_use = offer
+                                logging.info('Scheduling jobstep %s on slave %s which might have snapshot %s',
+                                             jobstep, offer.hostname, snapshot_id)
+                                break
+
+            # If we couldn't find a slave which is likely to have the snapshot already,
             # this gives us the least-loaded offer that we could actually use for this jobstep
-            # (we iterate in reverse because offers are sorted by number of resources)
-            for offer in sorted_offers:
-                if offer.has_resources_for(jobstep):
-                    offer_to_use = offer
-                    break
+            if not offer_to_use:
+                for offer in sorted_offers:
+                    if offer.has_resources_for(jobstep):
+                        offer_to_use = offer
+                        break
 
             # couldn't find any offers that would support this jobstep, move on
             if not offer_to_use:
                 continue
 
             sorted_offers.remove(offer_to_use)
+            if snapshot_id:
+                self._associate_snapshot_with_slave(snapshot_id, offer_to_use.hostname)
+
             offer_to_use.add_jobstep(jobstep)
             to_allocate.append(jobstep['id'])
             if offer_to_use.has_resources():
@@ -407,8 +456,6 @@ class ChangesScheduler(Scheduler):
           tasks will fail with a TASK_LOST status and a message saying as much).
         """
         logging.info("Got %d resource offers", len(pb_offers))
-        for pb_offer in pb_offers:
-            logging.info("Got offer: %s", _text_format.MessageToString(pb_offer))
         self._stats.incr('offers', len(pb_offers))
 
         self._blacklist.refresh()
@@ -557,6 +604,7 @@ class ChangesScheduler(Scheduler):
         state['taskJobStepMapping'] = self.taskJobStepMapping
         state['tasksLaunched'] = self.tasksLaunched
         state['tasksFinished'] = self.tasksFinished
+        state['snapshot_slave_map'] = self._snapshot_slave_map
         logging.info('Attempting to save state for framework %s with %d running tasks to %s',
                      self.framework_id, len(self.taskJobStepMapping), self.state_file)
         with open(self.state_file, 'w') as f:
@@ -574,6 +622,11 @@ class ChangesScheduler(Scheduler):
         self.taskJobStepMapping = state['taskJobStepMapping']
         self.tasksLaunched = state['tasksLaunched']
         self.tasksFinished = state['tasksFinished']
+        snapshot_slave_map = state['snapshot_slave_map']
+        self._snapshot_slave_map = defaultdict(lambda: defaultdict(float))
+        for snapshot, slave_map in snapshot_slave_map:
+            for slave, timestamp in slave_map:
+                self._snapshot_slave_map[snapshot][slave] = timestamp
 
         logging.info('Restored state for framework %s with %d running tasks from %s',
                      self.framework_id, len(self.taskJobStepMapping), self.state_file)

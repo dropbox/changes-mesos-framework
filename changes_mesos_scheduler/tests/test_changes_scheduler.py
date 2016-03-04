@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import tempfile
@@ -6,6 +7,10 @@ import time
 import mock
 
 from unittest import TestCase
+
+# Capture debug logging output on test failure
+logger = logging.getLogger()
+logger.level = logging.DEBUG
 
 try:
     from mesos.interface import mesos_pb2
@@ -68,9 +73,14 @@ class ChangesSchedulerTest(TestCase):
                                  text=mesos_pb2.Value.Text(value=cluster))
         return offer
 
-    def _make_changes_task(self, id, cpus=2, mem=4096, slug='foo', cmd='ls'):
+    def _make_changes_task(self, id, cpus=2, mem=4096, slug='foo', cmd='ls', snapshot=None):
+        image = None
+        if snapshot:
+            image = {'snapshot': {'id': snapshot}}
+
         return {'project': {'slug': slug}, 'id': id,
-                'cmd': cmd, 'resources': {'cpus': cpus, 'mem': mem}}
+                'cmd': cmd, 'resources': {'cpus': cpus, 'mem': mem},
+                'image': image}
 
     def test_save_restore_state(self):
         state_file = self.test_dir + '/test.json'
@@ -295,3 +305,198 @@ class ChangesSchedulerTest(TestCase):
         assert api.post_allocate_jobsteps.call_count == 2
         assert driver.launchTasks.call_count == 1
         assert cs.tasksLaunched == 1
+
+    def test_group_snapshots_on_same_machine(self):
+        # Create 2 tasks with same snapshot and assert they both go to the
+        # same slave.
+        api = mock.Mock(spec=ChangesAPI)
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('1', cpus=2, snapshot='snapfoo'),
+            self._make_changes_task('2', cpus=2, snapshot='snapfoo')
+        ]
+        api.post_allocate_jobsteps.return_value = ['1', '2']
+
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        def launchTasks(offer, tasks):
+            # Assert all launched tasks go to offer1 (host1)
+            # Due to stable sorting of offers based on remaining resources,
+            # host1 is assured to be picked first.
+            assert offer == mesos_pb2.OfferID(value="offer1")
+
+        driver.launchTasks.side_effect = launchTasks
+
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
+
+        cs.resourceOffers(driver, [offer1, offer2])
+
+        api.get_allocate_jobsteps.assert_called_once_with(limit=200,
+                                                          cluster=None)
+        assert api.post_allocate_jobsteps.call_count == 1
+        assert driver.launchTasks.call_count == 1
+        assert driver.declineOffer.call_count == 1
+        assert cs.tasksLaunched == 2
+
+    def test_fall_back_to_least_loaded(self):
+        # Fall back to least-loaded assignment if the snapshot for a task is
+        # not found on any slave.
+        api = mock.Mock(spec=ChangesAPI)
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('1', cpus=2, snapshot='snapfoo'),
+            self._make_changes_task('2', cpus=2, snapshot='snapbar')
+        ]
+        api.post_allocate_jobsteps.return_value = ['1', '2']
+
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
+
+        cs.resourceOffers(driver, [offer1, offer2])
+
+        api.get_allocate_jobsteps.assert_called_once_with(limit=200,
+                                                          cluster=None)
+        assert api.post_allocate_jobsteps.call_count == 1
+        assert driver.launchTasks.call_count == 2  # Jobs are sent to separate slaves
+        assert driver.declineOffer.call_count == 0
+        assert cs.tasksLaunched == 2
+
+    def test_prefer_loaded_slave_with_snapshot(self):
+        # Fall back to least-loaded assignment if the snapshot for a task is
+        # not found on any slave.
+        api = mock.Mock(spec=ChangesAPI)
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('1', cpus=2, snapshot='snapfoo')
+        ]
+        api.post_allocate_jobsteps.return_value = ['1']
+
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        cs.resourceOffers(driver, [offer1])
+
+        api.get_allocate_jobsteps.assert_called_once_with(limit=200,
+                                                          cluster=None)
+
+        api.reset_mock()
+        driver.reset_mock()
+
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('2', cpus=2, snapshot='snapfoo')
+        ]
+        api.post_allocate_jobsteps.return_value = ['2']
+
+        def launchTasks(offer, tasks):
+            # Assert launched task goes to offer1 (host1)
+            # although it has lesser resources than host2
+            assert offer == mesos_pb2.OfferID(value="offer1")
+
+        driver.launchTasks.side_effect = launchTasks
+
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=2)
+        offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
+        cs.resourceOffers(driver, [offer1, offer2])
+
+        api.get_allocate_jobsteps.assert_called_once_with(limit=200,
+                                                          cluster=None)
+        assert api.post_allocate_jobsteps.call_count == 1
+        assert driver.launchTasks.call_count == 1
+        assert driver.declineOffer.call_count == 1
+        assert cs.tasksLaunched == 2
+
+    def test_slave_with_snapshot_unavailable(self):
+        # Fall back to least-loaded assignment if the snapshot for a task is
+        # not found on any slave.
+        api = mock.Mock(spec=ChangesAPI)
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('1', cpus=2, snapshot='snapfoo')
+        ]
+        api.post_allocate_jobsteps.return_value = ['1']
+
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        cs.resourceOffers(driver, [offer1])
+
+        api.get_allocate_jobsteps.assert_called_once_with(limit=200,
+                                                          cluster=None)
+
+        api.reset_mock()
+        driver.reset_mock()
+
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('2', cpus=2, snapshot='snapfoo')
+        ]
+        api.post_allocate_jobsteps.return_value = ['2']
+
+        def launchTasks(offer, tasks):
+            # Assert offer is accepted although slave doesn't have snapshot.
+            assert offer == mesos_pb2.OfferID(value="offer2")
+
+        driver.launchTasks.side_effect = launchTasks
+
+        offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
+        cs.resourceOffers(driver, [offer2])
+
+        api.get_allocate_jobsteps.assert_called_once_with(limit=200,
+                                                          cluster=None)
+        assert api.post_allocate_jobsteps.call_count == 1
+        assert driver.launchTasks.call_count == 1
+        assert driver.declineOffer.call_count == 0
+        assert cs.tasksLaunched == 2
+
+    @mock.patch('time.time')
+    def test_slave_with_stale_snapshot(self, time_mock):
+        # Fall back to least-loaded assignment if the snapshot for a task is
+        # not found on any slave.
+        api = mock.Mock(spec=ChangesAPI)
+        time_mock.return_value = 1
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('1', cpus=2, snapshot='snapfoo')
+        ]
+        api.post_allocate_jobsteps.return_value = ['1']
+
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        cs.resourceOffers(driver, [offer1])
+
+        api.get_allocate_jobsteps.assert_called_once_with(limit=200,
+                                                          cluster=None)
+
+        api.reset_mock()
+        driver.reset_mock()
+        time_mock.return_value = 1000000
+
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('2', cpus=2, snapshot='snapfoo')
+        ]
+        api.post_allocate_jobsteps.return_value = ['2']
+
+        def launchTasks(offer, tasks):
+            # Ignore stale snapshot association and select least-loaded slave.
+            assert offer == mesos_pb2.OfferID(value="offer2")
+
+        driver.launchTasks.side_effect = launchTasks
+
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=2)
+        offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
+        cs.resourceOffers(driver, [offer1, offer2])
+
+        api.get_allocate_jobsteps.assert_called_once_with(limit=200,
+                                                          cluster=None)
+        assert api.post_allocate_jobsteps.call_count == 1
+        assert driver.launchTasks.call_count == 1
+        assert driver.declineOffer.call_count == 1
+        assert cs.tasksLaunched == 2
