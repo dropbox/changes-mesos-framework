@@ -18,8 +18,8 @@ except ImportError:
     from mesos import MesosSchedulerDriver
     import mesos_pb2
 
-from changes_scheduler import ChangesScheduler, ChangesAPI, FileBlacklist
-from statsreporter import StatsReporter
+from .changes_scheduler import ChangesScheduler, ChangesAPI, FileBlacklist
+from .statsreporter import StatsReporter
 
 # Configuration should contain the file 'blacklist' which
 # is a line-separated lists of hosts to blacklist.

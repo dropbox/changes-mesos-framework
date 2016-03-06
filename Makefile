@@ -28,9 +28,13 @@ install_deb: deb
 virtualenv_coverage: install_deb
 	. /usr/share/python/$(PKG_NAME)/bin/activate; \
 	make coverage
+	# Sanity check installed binary
+	/usr/share/python/$(PKG_NAME)/bin/$(PKG_NAME) --help
 
 virtualenv_test: install_deb
 	. /usr/share/python/$(PKG_NAME)/bin/activate; \
 	make test
+	# Sanity check installed binary
+	/usr/share/python/$(PKG_NAME)/bin/$(PKG_NAME) --help
 
 .PHONY: deb
