@@ -624,8 +624,8 @@ class ChangesScheduler(Scheduler):
         self.tasksFinished = state['tasksFinished']
         snapshot_slave_map = state['snapshot_slave_map']
         self._snapshot_slave_map = defaultdict(lambda: defaultdict(float))
-        for snapshot, slave_map in snapshot_slave_map:
-            for slave, timestamp in slave_map:
+        for snapshot, slave_map in snapshot_slave_map.iteritems():
+            for slave, timestamp in slave_map.iteritems():
                 self._snapshot_slave_map[snapshot][slave] = timestamp
 
         logging.info('Restored state for framework %s with %d running tasks from %s',

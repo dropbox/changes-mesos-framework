@@ -4,6 +4,8 @@ import shutil
 import tempfile
 import time
 
+from collections import defaultdict
+
 import mock
 
 from unittest import TestCase
@@ -90,6 +92,9 @@ class ChangesSchedulerTest(TestCase):
         cs.tasksLaunched = 5
         cs.tasksFinished = 3
         cs.taskJobStepMapping['task x'] = 'jobstep x'
+        cs._snapshot_slave_map = defaultdict(lambda: defaultdict(float))
+        cs._snapshot_slave_map['snapid']['host1'] = 1234567.0
+        cs._snapshot_slave_map['snapid']['host2'] = 1234569.0
         cs.save_state()
 
         cs2 = ChangesScheduler(state_file, api=mock.Mock(),
@@ -98,6 +103,7 @@ class ChangesSchedulerTest(TestCase):
         assert 3 == cs2.tasksFinished
         assert {'task x': 'jobstep x'} == cs2.taskJobStepMapping
         assert not os.path.exists(state_file)
+        assert {'snapid': {'host1': 1234567.0, 'host2': 1234569.0}} == cs2._snapshot_slave_map
 
     def test_blacklist(self):
         blpath = self.test_dir + '/blacklist'
