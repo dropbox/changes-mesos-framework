@@ -20,10 +20,11 @@ virtualenv:
 	./make_virtualenv.sh $(PKG_NAME)
 
 deb: virtualenv
-	fpm -f -t deb -s dir -C build -n $(PKG_NAME) -v $(DEB_VERSION) .
+	fpm -f -t deb -s dir -C build -n $(PKG_NAME) -v $(DEB_VERSION) -d libcurl3 -d libsvn1 -d libsasl2-modules .
 
 install_deb: deb
-	sudo dpkg -i "$(PKG_NAME)_$(DEB_VERSION)_amd64.deb"
+	sudo dpkg -i "$(PKG_NAME)_$(DEB_VERSION)_amd64.deb" || \
+	sudo apt-get install -f -y --force-yes  # Sadly, this is necessary to install any missing deps
 
 virtualenv_coverage: install_deb
 	. /usr/share/python/$(PKG_NAME)/bin/activate; \
