@@ -222,7 +222,9 @@ class ChangesSchedulerTest(TestCase):
         api.post_allocate_jobsteps.return_value = post_allocate_jobsteps_return
 
         # Actually run the test logic.
-        cs = ChangesScheduler(state_file=None, api=api, blacklist=_noop_blacklist())
+        stats = mock.Mock()
+        cs = ChangesScheduler(state_file=None, api=api, stats=stats,
+                              blacklist=_noop_blacklist())
         driver = mock.Mock()
         cs.resourceOffers(driver, all_offers)
 
@@ -230,6 +232,12 @@ class ChangesSchedulerTest(TestCase):
         for offer in expected_declines:
             driver.declineOffer.assert_any_call(offer.id)
         assert driver.declineOffer.call_count == len(expected_declines)
+
+        # Check the stats reporting.
+        assert stats.incr.call_count == 3
+        stats.incr.assert_any_call('offers', len(all_offers))
+        stats.incr.assert_any_call('decline_for_blacklist', 0)
+        stats.incr.assert_any_call('decline_for_maintenance', len(expected_declines))
 
         # Check that the non-maintenanced tasks are launched.
         assert driver.launchTasks.call_count == len(expected_launches)

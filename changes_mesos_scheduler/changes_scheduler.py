@@ -477,7 +477,8 @@ class ChangesScheduler(Scheduler):
 
         self._blacklist.refresh()
 
-        def decline(to_decline, reason_func):
+        def decline(to_decline, stats_counter_name, reason_func):
+            self._stats.incr(stats_counter_name, len(to_decline))
             for pb_offer in to_decline:
                 if reason_func:
                     logging.info(reason_func(pb_offer))
@@ -497,8 +498,8 @@ class ChangesScheduler(Scheduler):
             else:
                 usable.append(pb_offer)
 
-        decline(maintenanced, lambda pb_offer: "Declining offer from maintenanced hostname: %s" % pb_offer.hostname)
-        decline(blacklisted, lambda pb_offer: "Declining offer from blacklisted hostname: %s" % pb_offer.hostname)
+        decline(maintenanced, 'decline_for_maintenance', lambda pb_offer: "Declining offer from maintenanced hostname: %s" % pb_offer.hostname)
+        decline(blacklisted, 'decline_for_blacklist', lambda pb_offer: "Declining offer from blacklisted hostname: %s" % pb_offer.hostname)
 
         offers = [ChangesScheduler.OfferWrapper(pb_offer) for pb_offer in usable]
         offers_for_cluster = defaultdict(list)
