@@ -289,13 +289,15 @@ class ChangesSchedulerTest(TestCase):
                               blacklist=_noop_blacklist())
         driver = mock.Mock()
 
-        offer = self._make_offer(cluster="foo_cluster")
+        offer = self._make_offer(hostname='aHostname', cluster="foo_cluster")
 
         def check_tasks(offer_id, tasks):
             assert offer_id == offer.id
             assert len(tasks) == 1
             assert tasks[0].name == 'foo 1'
             assert tasks[0].slave_id.value == offer.slave_id.value
+            assert tasks[0].labels.labels[0].key == 'hostname'
+            assert tasks[0].labels.labels[0].value == 'aHostname'
             assert tasks[0].command.value == 'ls'
             assert tasks[0].resources[0].name == "cpus"
             assert tasks[0].resources[0].scalar.value == 2

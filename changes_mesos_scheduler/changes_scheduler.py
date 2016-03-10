@@ -126,7 +126,7 @@ class ChangesAPI(object):
             data['cluster'] = cluster
         return self._api_request("/jobsteps/allocate/", data)['allocated']
 
-    def update_jobstep(self, jobstep_id, status, result=None):
+    def update_jobstep(self, jobstep_id, status, result=None, hostname=None):
         """ Update the recorded status and possibly result of a JobStep in Changes.
 
         Args:
@@ -137,6 +137,8 @@ class ChangesAPI(object):
         data = {"status": status}
         if result:
             data["result"] = result
+        if hostname:
+            data["node"] = hostname
         self._api_request("/jobsteps/{}/".format(jobstep_id), data)
 
     def jobstep_console_append(self, jobstep_id, text):
@@ -323,6 +325,8 @@ class ChangesScheduler(Scheduler):
         )
         task.task_id.value = str(tid)
         task.slave_id.value = offer.slave_id.value
+
+        hostname = task.labels.labels.add(key="hostname", value=offer.hostname)
 
         cmd = jobstep["cmd"]
 
@@ -567,9 +571,20 @@ class ChangesScheduler(Scheduler):
                           _text_format.MessageToString(status))
             return
 
+        hostname = None
+        for label in status.labels.labels:
+            if label.key == 'hostname':
+                # we only use the first part of the hostname
+                hostname = label.value
+                break
+        if hostname:
+            hostname = hostname.split('.')[0]
+        else:
+            logging.warning('No hostname associated with task: %s', status.task_id.value)
+
         if state == 'finished':
             try:
-                self._changes_api.update_jobstep(jobstep_id, status="finished")
+                self._changes_api.update_jobstep(jobstep_id, status="finished", hostname=hostname)
             except APIError:
                 pass
         elif state in ('killed', 'lost', 'failed'):
@@ -585,7 +600,7 @@ class ChangesScheduler(Scheduler):
             except APIError:
                 pass
             try:
-                self._changes_api.update_jobstep(jobstep_id, status="finished", result="infra_failed")
+                self._changes_api.update_jobstep(jobstep_id, status="finished", result="infra_failed", hostname=hostname)
             except APIError:
                 pass
 
