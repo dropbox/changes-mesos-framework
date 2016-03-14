@@ -577,9 +577,7 @@ class ChangesScheduler(Scheduler):
                 # we only use the first part of the hostname
                 hostname = label.value
                 break
-        if hostname:
-            hostname = hostname.split('.')[0]
-        else:
+        if not hostname:
             logging.warning('No hostname associated with task: %s', status.task_id.value)
 
         if state == 'finished':
