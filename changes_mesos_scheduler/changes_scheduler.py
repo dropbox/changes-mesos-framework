@@ -5,16 +5,18 @@ import json
 import logging
 import os
 import time
-import urllib2
+import urllib2 # type: ignore
 
 from changes_mesos_scheduler import statsreporter
+
+from typing import Any, Set
 
 from collections import defaultdict
 from threading import Event
 from urllib import urlencode
 from uuid import uuid4
 
-from google.protobuf import text_format as _text_format
+from google.protobuf import text_format as _text_format # type: ignore
 
 try:
     from mesos.interface import Scheduler
@@ -30,9 +32,10 @@ class FileBlacklist(object):
     Whitespace and lines beginning with '#' are ignored.
     """
     def __init__(self, path):
-        self._path = path
+        # type: (str) -> None
+        self._path = path # type: str
         self._mtime = 0
-        self._blacklist = set()
+        self._blacklist = set() # type: Set[str]
 
     def refresh(self):
         """Refresh the blacklist if the file changed."""
@@ -47,6 +50,7 @@ class FileBlacklist(object):
             self._blacklist = set([s.strip() for s in file.readlines() if not s.startswith('#')])
 
     def contains(self, hostname):
+        # type: (str) -> bool
         """Returns whether the provided hostname is present in the blacklist as of last reading."""
         return hostname in self._blacklist
 
@@ -57,6 +61,7 @@ class APIError(Exception):
     originating from API requests doesn't muddy the error handling in the Scheduler.
     """
     def __init__(self, msg, cause=None):
+        # type: (str, Any) -> None
         super(APIError, self).__init__(msg)
         self.cause = cause
 
@@ -489,7 +494,7 @@ class ChangesScheduler(Scheduler):
                 driver.declineOffer(pb_offer.id)
 
         if self.shuttingDown.is_set():
-            decline(pb_offers, lambda pb_offer: "Shutting down, declining offer: %s" % pb_offer.id)
+            decline(pb_offers, 'decline_for_shutdown', lambda pb_offer: "Shutting down, declining offer: %s" % pb_offer.id)
             return
 
         now_nanos = int(time.time() * 1000000000)

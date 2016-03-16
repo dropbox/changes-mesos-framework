@@ -11,3 +11,5 @@ fpm -h > /dev/null || sudo gem install fpm --no-ri --no-rdoc
 
 # Install easy_install for fpm to use
 sudo apt-get install -y python-setuptools
+
+sudo ci/mypy-setup
