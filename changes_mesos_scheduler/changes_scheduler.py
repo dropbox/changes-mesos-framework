@@ -9,7 +9,7 @@ import urllib2 # type: ignore
 
 from changes_mesos_scheduler import statsreporter
 
-from typing import Any, Set
+from typing import Any, Set, Callable
 
 from collections import defaultdict
 from threading import Event
@@ -362,25 +362,26 @@ class ChangesScheduler(Scheduler):
 
         return None
 
-    def _assign_jobsteps(self, cluster, offers):
-        """ Attempts to schedule as many jobsteps as possible (using a least
-        loaded approach) on the given set of offers.
-
-         Args:
-            cluster (string): The cluster of the offers in question (could be
-                the None cluster)
-            offers (list[OfferWrapper]): list of currently available offers
+    def _fetch_jobsteps(self, cluster):
+        # type: (str) -> List[Dict[str, str]]
+        """Query Changes for all allocatable jobsteps for the specified cluster.
         """
-        # TODO(nate): may want to do this POST in a loop (til there are no
-        # jobsteps or we've filled our offers), so there's no 5s delay in scheduling many jobsteps
         try:
             possible_jobsteps = self._changes_api.get_allocate_jobsteps(limit=self.changes_request_limit, cluster=cluster)
         except APIError:
             logging.warning('/jobstep/allocate/ GET failed for cluster: %s', cluster, exc_info=True)
             possible_jobsteps = []
-        if not possible_jobsteps:
-            return
+        return possible_jobsteps
 
+    def _assign_jobsteps(self, cluster, offers_for_cluster, jobsteps_for_cluster):
+        # type: (str, List[Any], List[Dict[str, str]]) -> None
+        """Make assignments for jobsteps for a cluster to offers for a cluster.
+        Assignments are stored in the OfferWrapper, to be launched later.
+        Args:
+            cluster: The cluster to make assignments for.
+            offers_for_cluster: A list of offers for the cluster.
+            jobsteps_for_cluster: A list of jobsteps for the cluster.
+        """
         to_allocate = []
         # Changes returns JobSteps in priority order, so for each one
         # we attempt to put it on the machine with the least current load that
@@ -388,8 +389,8 @@ class ChangesScheduler(Scheduler):
         # optimal algorithm--it might allocate fewer jobsteps than is possible,
         # and it currently prioritizes cpu over memory. We don't believe this
         # to be an issue currently, but it may be worth improving in the future
-        sorted_offers = sorted(offers)
-        for jobstep in possible_jobsteps:
+        sorted_offers = sorted(offers_for_cluster)
+        for jobstep in jobsteps_for_cluster:
             if len(sorted_offers) == 0:
                 break
             offer_to_use = None
@@ -446,11 +447,21 @@ class ChangesScheduler(Scheduler):
             # NB: cluster could be None here
             logging.warning("Could not successfully allocate for cluster: %s", cluster)
             # for now we just give up on this cluster entirely
-            for offer in offers:
+            for offer in offers_for_cluster:
                 offer.remove_all_jobsteps()
 
     @staticmethod
     def _is_maintenanced(pb_offer, now_nanos):
+        # type: (Any, int) -> bool
+        """Determine if a Mesos offer indicates that a maintenance window is in
+        progress.
+        Args:
+            pb_offer (Mesos Offer protobuf): The Offer to check
+            now_nanos: Timestamp of right now in nanoseconds, for comparing to
+                the offer's (optional) maintenance time window.
+        Returns:
+            True if the offer is in the maintenance window, False otherwise.
+        """
         if not pb_offer.HasField('unavailability'):
             return False
 
@@ -466,7 +477,66 @@ class ChangesScheduler(Scheduler):
 
         return now_nanos > start_time and now_nanos < end_time
 
+    def _decline_list(self, driver, to_decline, stats_counter_name, reason_func):
+        # type: (Scheduler, List[Any], str, Callable[[Any], str]) -> None 
+        """Inform the Mesos master that we're declining a list of offers.
+        Args:
+            driver: the MesosSchedulerDriver object
+            to_decline: The list of offers to decline
+            stats_counter_name: A counter name to increment, to track stats for
+                different decline reasons.
+            reason_func (function(Mesos Offer protobuf)): A function to generate
+                a logging string, to explain why this offer was declined.
+        """
+        self._stats.incr(stats_counter_name, len(to_decline))
+        for pb_offer in to_decline:
+            if reason_func:
+                logging.info(reason_func(pb_offer))
+            driver.declineOffer(pb_offer.id)
+
+    def _filter_offers(self, driver, pb_offers):
+        # type: (Scheduler, List[Any]) -> List[Any]
+        """Given a list of offer protos, decline blacklisted or unusable
+        offers. Return a list of usable offers.
+        Args:
+            driver: the MesosSchedulerDriver object
+            pb_offers (list of Mesos Offer protobufs): A list of offers, some
+                of which are usable and some of which might not be usable.
+        Returns:
+            list of usable Mesos Offer protobufs
+        """
+        self._blacklist.refresh()
+        now_nanos = int(time.time() * 1000000000)
+        maintenanced, blacklisted, usable = [], [], []
+        for pb_offer in pb_offers:
+            if ChangesScheduler._is_maintenanced(pb_offer, now_nanos):
+                maintenanced.append(pb_offer)
+            elif self._blacklist.contains(pb_offer.hostname):
+                blacklisted.append(pb_offer)
+            else:
+                usable.append(pb_offer)
+
+        self._decline_list(driver, maintenanced, 'decline_for_maintenance', lambda pb_offer: "Declining offer from maintenanced hostname: %s" % pb_offer.hostname)
+        self._decline_list(driver, blacklisted, 'decline_for_blacklist', lambda pb_offer: "Declining offer from blacklisted hostname: %s" % pb_offer.hostname)
+        return usable
+
+    def _launch_jobsteps(self, driver, offers_for_cluster):
+        # type: (Scheduler, List[OfferWrapper]) -> None
+        """Given a list of offers, launch all jobsteps assigned on each offer.  
+        Args:
+            driver: the MesosSchedulerDriver object
+            offers_for_cluster: A list of offers with assigned jobsteps already
+                embedded. Launch the jobsteps on the offer.
+        """
+
+        # we've allocated all the jobsteps we can, now we launch them
+        for offer in offers_for_cluster:
+            if len(offer.jobsteps) > 0:
+                tasks = [self._jobstep_to_task(offer.offer, jobstep) for jobstep in offer.jobsteps]
+                driver.launchTasks(offer.offer.id, tasks)
+
     def resourceOffers(self, driver, pb_offers):
+        # type: (Any, List[Any]) -> None
         """
           Invoked when resources have been offered to this framework. A single
           offer will only contain resources from a single slave.  Resources
@@ -484,49 +554,36 @@ class ChangesScheduler(Scheduler):
         logging.info("Got %d resource offers", len(pb_offers))
         self._stats.incr('offers', len(pb_offers))
 
-        self._blacklist.refresh()
-
-        def decline(to_decline, stats_counter_name, reason_func):
-            self._stats.incr(stats_counter_name, len(to_decline))
-            for pb_offer in to_decline:
-                if reason_func:
-                    logging.info(reason_func(pb_offer))
-                driver.declineOffer(pb_offer.id)
-
         if self.shuttingDown.is_set():
-            decline(pb_offers, 'decline_for_shutdown', lambda pb_offer: "Shutting down, declining offer: %s" % pb_offer.id)
+            self._decline_list(driver, pb_offers, 'decline_for_shutdown', lambda offer: "Shutting down, declining offer: %s" % offer.id)
             return
 
-        now_nanos = int(time.time() * 1000000000)
-        maintenanced, blacklisted, usable = [], [], []
-        for pb_offer in pb_offers:
-            if ChangesScheduler._is_maintenanced(pb_offer, now_nanos):
-                maintenanced.append(pb_offer)
-            elif self._blacklist.contains(pb_offer.hostname):
-                blacklisted.append(pb_offer)
-            else:
-                usable.append(pb_offer)
+        usable_pb_offers = self._filter_offers(driver, pb_offers)
+        usable_offers = [ChangesScheduler.OfferWrapper(pb_offer) for pb_offer in usable_pb_offers]
 
-        decline(maintenanced, 'decline_for_maintenance', lambda pb_offer: "Declining offer from maintenanced hostname: %s" % pb_offer.hostname)
-        decline(blacklisted, 'decline_for_blacklist', lambda pb_offer: "Declining offer from blacklisted hostname: %s" % pb_offer.hostname)
+        # Sort incoming offers by cluster to which they apply.
+        offers_by_cluster = defaultdict(list)  # type: Dict[str, List[ChangesScheduler.OfferWrapper]]
+        for offer in usable_offers:
+            cluster = offer.cluster()
+            offers_by_cluster[cluster].append(offer)
 
-        offers = [ChangesScheduler.OfferWrapper(pb_offer) for pb_offer in usable]
-        offers_for_cluster = defaultdict(list)
-        for offer in offers:
-            offers_for_cluster[offer.cluster()].append(offer)
+        # Query Changes for the pending jobsteps for each cluster for which we
+        # have offers available.
+        jobsteps_by_cluster = defaultdict(list)  # type: Dict[str, List[Dict[str, str]]]
+        for cluster in offers_by_cluster.iterkeys():
+            jobsteps = self._fetch_jobsteps(cluster)
+            jobsteps_by_cluster[cluster] = jobsteps
 
-        for cluster, cluster_offers in offers_for_cluster.iteritems():
-            self._assign_jobsteps(cluster, cluster_offers)
+        # Allocate and launch tasks.
+        for cluster, jobsteps in jobsteps_by_cluster.iteritems():
+            self._assign_jobsteps(cluster, offers_by_cluster[cluster], jobsteps_by_cluster[cluster])
+            self._launch_jobsteps(driver, offers_by_cluster[cluster])
 
-        # we've allocated all the jobsteps we can, now we launch them
-        for offer in offers:
+        # Decline unused offers.
+        for offer in usable_offers:
             if len(offer.jobsteps) == 0:
-                logging.info("No tasks to run, declining offer: %s", offer.offer.id)
+                logging.info("No tasks to run, decline offer: %s", offer.offer.id)
                 driver.declineOffer(offer.offer.id)
-                continue
-
-            tasks = [self._jobstep_to_task(offer.offer, jobstep) for jobstep in offer.jobsteps]
-            driver.launchTasks(offer.offer.id, tasks)
 
     def offerRescinded(self, driver, offerId):
         """
