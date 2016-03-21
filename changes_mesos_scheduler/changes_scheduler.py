@@ -4,12 +4,14 @@ import bisect
 import json
 import logging
 import os
+import sys
+import threading
 import time
 import urllib2 # type: ignore
 
 from changes_mesos_scheduler import statsreporter
 
-from typing import Any, Set, Callable
+from typing import Any, Set, Tuple, Callable
 
 from collections import defaultdict
 from threading import Event
@@ -19,10 +21,10 @@ from uuid import uuid4
 from google.protobuf import text_format as _text_format # type: ignore
 
 try:
-    from mesos.interface import Scheduler
+    from mesos.interface import Scheduler, SchedulerDriver
     from mesos.interface import mesos_pb2
 except ImportError:
-    from mesos import Scheduler
+    from mesos import Scheduler, SchedulerDriver
     import mesos_pb2
 
 
@@ -180,6 +182,12 @@ class ChangesScheduler(Scheduler):
         self.changes_request_limit = changes_request_limit
         self._snapshot_slave_map = defaultdict(lambda: defaultdict(float))
 
+        # Variables to help with polling Changes for pending jobsteps in a
+        # separate thread. _cached_pb_offers_lock protects _cached_pb_offers.
+        self._cached_pb_offers_lock = threading.Lock()
+        self._cached_pb_offers = {}
+        self._polling_thread = None
+
         # Restore state from a previous run
         if not self.state_file:
             logging.warning("State file location not set. Not restoring old state.")
@@ -194,6 +202,129 @@ class ChangesScheduler(Scheduler):
                 # Delete the old file to prevent it from being used again on a restart
                 # as it will likely be stale.
                 os.remove(self.state_file)
+
+    def poll_changes_until_shutdown(self, driver, interval, loop_done_callback=None):
+        # type: (SchedulerDriver, int, Callable[[], None]) -> None
+        """Start a loop to poll Changes for jobsteps that need to be scheduled.
+        This method will not block, returning immediately after kicking off the
+        polling thread.
+        The poll loop operates by wait()ing for [interval] on the shuttingDown
+        event. If the signal arrives, the thread exits immediately. If the
+        wait() threshold occurs instead, the thread polls Changes and schedules
+        tasks, then returns to wait()ing.
+        Args:
+            driver: the MesosSchedulerDriver object
+            interval: number of seconds in each poll loop.
+            loop_done_callback: A Noneable callback function which is invoked
+                whenever a poll cycle has completed. In practice, this is used
+                by testing to synchronize threads.
+        """
+        def polling_loop():
+            # type: () -> None
+            """Poll Changes for new jobsteps one time.
+            """
+            next_wait_duration = 0.0
+            while not self.shuttingDown.wait(next_wait_duration):
+                start_time = time.time()
+                try:
+                    # Loop as long as Changes continues providing tasks to
+                    # schedule.
+                    while self._do_one_poll_cycle(driver):
+                        pass
+                finally:
+                    # If one is provided, invoke a callback when all available
+                    # jobsteps have been received from Changes. In practice,
+                    # this is used to synchronize thread events for testing
+                    # purposes.
+                    # Ensure this code runs even if an error occurs (i.e. in
+                    # "finally"), otherwise tests can hang annoyingly.
+                    if loop_done_callback:
+                        loop_done_callback()
+
+                # Schedule the delay for the next iteration of the loop,
+                # attempting to compensate for scheduling skew caused by
+                # polling/computation time.
+                last_poll_duration = time.time() - start_time
+                next_wait_duration = max(0, interval - last_poll_duration)
+        self._polling_thread = threading.Thread(target=polling_loop)
+        self._polling_thread.start()
+
+    def _do_one_poll_cycle(self, driver):
+        # type: (SchedulerDriver) -> bool
+        """Poll Changes once for all jobsteps matching all clusters for which
+        we have offers. Then assign these jobsteps to offers. Then execute the
+        assignments by launching tasks on Mesos and informing Changes about
+        the assignments.
+        Args:
+            driver: the MesosSchedulerDriver object
+        Returns:
+            bool: True if there are more jobsteps to fetch from Changes, False
+                otherwise.
+        """
+        # TODO: There's presently a window between post_allocate_jobsteps() and
+        # launchTasks() where Changes thinks tasks are scheduled on Mesos, but
+        # the tasks haven't actually been scheduled yet. If there's a shutdown
+        # or failure in this window, it can be a long time before Changes will
+        # figure it out and re-submit the tasks to the scheduler.
+        #
+        # Also note that until post_allocate_jobsteps() is called, Changes will
+        # just keep returning the same set of jobsteps to
+        # get_allocate_jobsteps(). Thus we call get- and post- in a 1:1
+        # ratio, otherwise we could have an infinite poll loop on Changes.
+        #
+        # To that end, consider implementing something like the following:
+        #  1) Query Changes for jobsteps
+        #  2) Internally assign jobsteps to offers
+        #  3) Store assignments in scheduler's state.pending_assignments
+        #  4) Write the state file each time the state changes, rather than
+        #     only on shutdown, such that we'd have everything in order in the
+        #     event of a problem.
+        #  5) post_allocate_jobsteps() the assignments
+        #  6) Goto 1 until no more jobsteps
+        #  7) Launch jobsteps on mesos
+        #  8) Clear state.pending_assignments and write state file.
+        #
+        #  9) On startup, jobstep_deallocate any state.pending_assignments
+        with self._cached_pb_offers_lock:
+            # Get all offers
+            pb_offers = self._cached_pb_offers.values()
+            offers_by_cluster = self._usable_offers_by_cluster(pb_offers)
+
+            # Get all jobsteps, organized by cluster.
+            jobsteps_by_cluster = self._query_changes_for_jobsteps(
+                    driver, offers_by_cluster.keys())
+
+            # For each cluster, assign jobsteps to offers, then launch the
+            # jobsteps.
+            for cluster, jobsteps in jobsteps_by_cluster.iteritems():
+                self._assign_jobsteps(cluster,
+                                      offers_by_cluster[cluster],
+                                      jobsteps_by_cluster[cluster])
+                self._launch_jobsteps(driver,
+                                      cluster,
+                                      offers_by_cluster[cluster])
+
+        # Guess whether or not there are more jobsteps waiting on Changes by
+        # comparing the number of jobsteps received vs. the number of jobsteps
+        # requested.
+        return len(jobsteps_by_cluster) == self.changes_request_limit
+
+    def wait_for_shutdown(self, driver):
+        # type: (SchedulerDriver) -> None
+        """Wait for the shutdown signal to be set, then decline all cached
+        Mesos pb_offers.
+        """
+        # Wait for shuttingDown() to be set and for the polling thread to
+        # terminate, then clean up scheduler state..
+        self.shuttingDown.wait()
+        self._polling_thread.join()
+
+        # Decline any outstanding offers from the Mesos master.
+        with self._cached_pb_offers_lock:
+            pb_offers = self._cached_pb_offers.values()
+            self._stat_and_log_list(pb_offers, 'decline_for_shutdown',
+                                    lambda offer: "Shutting down, declining offer: %s" % offer.id)
+            self._decline_list(driver, pb_offers)
 
     def registered(self, driver, frameworkId, masterInfo):
         """
@@ -376,7 +507,7 @@ class ChangesScheduler(Scheduler):
         return possible_jobsteps
 
     def _assign_jobsteps(self, cluster, offers_for_cluster, jobsteps_for_cluster):
-        # type: (str, List[Any], List[Dict[str, str]]) -> None
+        # type: (str, List[Any], List[Dict[str, str]]) -> List[str]
         """Make assignments for jobsteps for a cluster to offers for a cluster.
         Assignments are stored in the OfferWrapper, to be launched later.
         Args:
@@ -384,7 +515,6 @@ class ChangesScheduler(Scheduler):
             offers_for_cluster: A list of offers for the cluster.
             jobsteps_for_cluster: A list of jobsteps for the cluster.
         """
-        to_allocate = []
         # Changes returns JobSteps in priority order, so for each one
         # we attempt to put it on the machine with the least current load that
         # still has sufficient resources for it. This is not necessarily an
@@ -434,23 +564,8 @@ class ChangesScheduler(Scheduler):
                 self._associate_snapshot_with_slave(snapshot_id, offer_to_use.hostname)
 
             offer_to_use.add_jobstep(jobstep)
-            to_allocate.append(jobstep['id'])
             if offer_to_use.has_resources():
                 bisect.insort(sorted_offers, offer_to_use)
-
-        if not to_allocate:
-            return
-
-        try:
-            allocated_ids = self._changes_api.post_allocate_jobsteps(to_allocate, cluster=cluster)
-        except APIError:
-            allocated_ids = []
-        if sorted(allocated_ids) != sorted(to_allocate):
-            # NB: cluster could be None here
-            logging.warning("Could not successfully allocate for cluster: %s", cluster)
-            # for now we just give up on this cluster entirely
-            for offer in offers_for_cluster:
-                offer.remove_all_jobsteps()
 
     @staticmethod
     def _is_maintenanced(pb_offer, now_nanos):
@@ -479,11 +594,10 @@ class ChangesScheduler(Scheduler):
 
         return now_nanos > start_time and now_nanos < end_time
 
-    def _decline_list(self, driver, to_decline, stats_counter_name, reason_func):
-        # type: (Scheduler, List[Any], str, Callable[[Any], str]) -> None 
+    def _stat_and_log_list(self, to_decline, stats_counter_name, reason_func):
+        # type: (List[Any], str, Callable[[Any], str]) -> None
         """Inform the Mesos master that we're declining a list of offers.
         Args:
-            driver: the MesosSchedulerDriver object
             to_decline: The list of offers to decline
             stats_counter_name: A counter name to increment, to track stats for
                 different decline reasons.
@@ -494,14 +608,22 @@ class ChangesScheduler(Scheduler):
         for pb_offer in to_decline:
             if reason_func:
                 logging.info(reason_func(pb_offer))
+
+    def _decline_list(self, driver, to_decline):
+        # type: (SchedulerDriver, List[Any]) -> None
+        """Inform the Mesos master that we're declining a list of offers.
+        Args:
+            driver: the MesosSchedulerDriver object
+            to_decline: The list of offers to decline
+        """
+        for pb_offer in to_decline:
             driver.declineOffer(pb_offer.id)
 
-    def _filter_offers(self, driver, pb_offers):
-        # type: (Scheduler, List[Any]) -> List[Any]
+    def _filter_offers(self, pb_offers):
+        # type: (List[Any]) -> List[Any]
         """Given a list of offer protos, decline blacklisted or unusable
         offers. Return a list of usable offers.
         Args:
-            driver: the MesosSchedulerDriver object
             pb_offers (list of Mesos Offer protobufs): A list of offers, some
                 of which are usable and some of which might not be usable.
         Returns:
@@ -518,27 +640,56 @@ class ChangesScheduler(Scheduler):
             else:
                 usable.append(pb_offer)
 
-        self._decline_list(driver, maintenanced, 'decline_for_maintenance', lambda pb_offer: "Declining offer from maintenanced hostname: %s" % pb_offer.hostname)
-        self._decline_list(driver, blacklisted, 'decline_for_blacklist', lambda pb_offer: "Declining offer from blacklisted hostname: %s" % pb_offer.hostname)
+        self._stat_and_log_list(maintenanced, 'ignore_for_maintenance',
+                                lambda pb_offer: "Ignoring offer from maintenanced hostname: %s" % pb_offer.hostname)
+        self._stat_and_log_list(blacklisted, 'ignore_for_blacklist',
+                                lambda pb_offer: "Ignoring offer from blacklisted hostname: %s" % pb_offer.hostname)
         return usable
 
-    def _launch_jobsteps(self, driver, offers_for_cluster):
-        # type: (Scheduler, List[OfferWrapper]) -> None
-        """Given a list of offers, launch all jobsteps assigned on each offer.  
+    def _launch_jobsteps(self, driver, cluster, offers_for_cluster):
+        # type: (SchedulerDriver, str, List[OfferWrapper]) -> None
+        """Given a list of offers, launch all jobsteps assigned on each offer.
+        Remove from the Offers cache any used offers.
         Args:
             driver: the MesosSchedulerDriver object
             offers_for_cluster: A list of offers with assigned jobsteps already
                 embedded. Launch the jobsteps on the offer.
         """
+        if len(offers_for_cluster) == 0:
+            return
+
+        # Inform Changes of where the jobsteps are going.
+        to_allocate = []
+        for offer in offers_for_cluster:
+            jobstep_ids = [jobstep['id'] for jobstep in offer.jobsteps]
+            to_allocate.extend(jobstep_ids)
+
+        if len(to_allocate) == 0:
+            return
+
+        try:
+            allocated_ids = self._changes_api.post_allocate_jobsteps(
+                    to_allocate, cluster=cluster)
+        except APIError:
+            allocated_ids = []
+        if sorted(allocated_ids) != sorted(to_allocate):
+            # NB: cluster could be None here
+            logging.warning("Could not successfully allocate for cluster: %s", cluster)
+            # for now we just give up on this cluster entirely
+            for offer in offers_for_cluster:
+                offer.remove_all_jobsteps()
 
         # we've allocated all the jobsteps we can, now we launch them
         for offer in offers_for_cluster:
             if len(offer.jobsteps) > 0:
                 tasks = [self._jobstep_to_task(offer.offer, jobstep) for jobstep in offer.jobsteps]
-                driver.launchTasks(offer.offer.id, tasks)
+                filters = mesos_pb2.Filters()
+                filters.refuse_seconds = 1.0
+                driver.launchTasks(offer.offer.id, tasks, filters)
+                del(self._cached_pb_offers[offer.offer.id.value])
 
     def resourceOffers(self, driver, pb_offers):
-        # type: (Any, List[Any]) -> None
+        # type: (SchedulerDriver, List[Any]) -> None
         """
           Invoked when resources have been offered to this framework. A single
           offer will only contain resources from a single slave.  Resources
@@ -556,11 +707,24 @@ class ChangesScheduler(Scheduler):
         logging.info("Got %d resource offers", len(pb_offers))
         self._stats.incr('offers', len(pb_offers))
 
-        if self.shuttingDown.is_set():
-            self._decline_list(driver, pb_offers, 'decline_for_shutdown', lambda offer: "Shutting down, declining offer: %s" % offer.id)
-            return
+        # Simply add the offers to our local cache of available offers.
+        # Jobsteps are allocated asynchronously, driven by
+        # poll_changes_until_shutdown().
+        with self._cached_pb_offers_lock:
+            for pb_offer in pb_offers:
+                self._cached_pb_offers[pb_offer.id.value] = pb_offer
 
-        usable_pb_offers = self._filter_offers(driver, pb_offers)
+    def _usable_offers_by_cluster(self, pb_offers):
+        # type: (List[Any]) -> Dict[str, List[ChangesScheduler.OfferWrapper]]
+        """Given a list of Offer protobufs, produce a collection of
+        OfferWrappers with the offers grouped by cluster (i.e. a dictionary)
+        *omitting* blacklisted, maintenced, or otherwise filtered offers.
+        Args:
+            pb_offers: The list of Offer protobufs to wrap-and-organize.
+        Returns:
+            dictionary of {cluster: [OfferWrapper, ...]}
+        """
+        usable_pb_offers = self._filter_offers(pb_offers)
         usable_offers = [ChangesScheduler.OfferWrapper(pb_offer) for pb_offer in usable_pb_offers]
 
         # Sort incoming offers by cluster to which they apply.
@@ -568,26 +732,21 @@ class ChangesScheduler(Scheduler):
         for offer in usable_offers:
             cluster = offer.cluster()
             offers_by_cluster[cluster].append(offer)
+        return offers_by_cluster
 
-        # Query Changes for the pending jobsteps for each cluster for which we
-        # have offers available.
+    def _query_changes_for_jobsteps(self, driver, clusters):
+        # type: (SchedulerDriver, List[str]) -> Dict[str, List[Dict[str, str]]]
+        """Query Changes for the pending jobsteps for each cluster for which we
+        have offers available.
+        """
         jobsteps_by_cluster = defaultdict(list)  # type: Dict[str, List[Dict[str, str]]]
-        for cluster in offers_by_cluster.iterkeys():
+        for cluster in clusters:
             jobsteps = self._fetch_jobsteps(cluster)
             jobsteps_by_cluster[cluster] = jobsteps
-
-        # Allocate and launch tasks.
-        for cluster, jobsteps in jobsteps_by_cluster.iteritems():
-            self._assign_jobsteps(cluster, offers_by_cluster[cluster], jobsteps_by_cluster[cluster])
-            self._launch_jobsteps(driver, offers_by_cluster[cluster])
-
-        # Decline unused offers.
-        for offer in usable_offers:
-            if len(offer.jobsteps) == 0:
-                logging.info("No tasks to run, decline offer: %s", offer.offer.id)
-                driver.declineOffer(offer.offer.id)
+        return jobsteps_by_cluster
 
     def offerRescinded(self, driver, offerId):
+        # type: (SchedulerDriver, Any) -> None
         """
           Invoked when an offer is no longer valid (e.g., the slave was lost or
           another framework used resources in the offer.) If for whatever reason
@@ -595,8 +754,13 @@ class ChangesScheduler(Scheduler):
           framework, etc.), a framwork that attempts to launch tasks using an
           invalid offer will receive TASK_LOST status updats for those tasks
           (see Scheduler.resourceOffers).
+          Args:
+            driver: the MesosSchedulerDriver object
+            offerId: a Mesos OfferId protobuf
         """
         logging.info("Offer rescinded: %s", offerId.value)
+        with self._cached_pb_offers_lock:
+            del(self._cached_pb_offers[offerId])
 
     def statusUpdate(self, driver, status):
         """

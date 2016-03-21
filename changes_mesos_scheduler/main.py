@@ -110,8 +110,9 @@ def run(api_url, mesos_master, user, config_dir, state_file, changes_request_lim
 
     driver.start()
     logging.info("Driver started")
-    while not stopped.is_set():
-        stopped.wait(3)
+
+    scheduler.poll_changes_until_shutdown(driver, 5, None)
+    scheduler.wait_for_shutdown(driver)
     status = 0 if driver.join() == mesos_pb2.DRIVER_STOPPED else 1
 
     # Ensure that the driver process terminates.
