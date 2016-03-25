@@ -367,7 +367,9 @@ class ChangesScheduler(Scheduler):
         """Query Changes for all allocatable jobsteps for the specified cluster.
         """
         try:
-            possible_jobsteps = self._changes_api.get_allocate_jobsteps(limit=self.changes_request_limit, cluster=cluster)
+            with self._stats.timer('poll_changes'):
+                possible_jobsteps = self._changes_api.get_allocate_jobsteps(limit=self.changes_request_limit,
+                                                                            cluster=cluster)
         except APIError:
             logging.warning('/jobstep/allocate/ GET failed for cluster: %s', cluster, exc_info=True)
             possible_jobsteps = []
@@ -648,6 +650,7 @@ class ChangesScheduler(Scheduler):
             except APIError:
                 pass
         elif state in ('killed', 'lost', 'failed'):
+            self._stats.incr('task_' + state)
             # Jobsteps are only intended to be executed once and should only exit non-zero or be
             # lost/killed by infrastructural issues, so we don't attempt to reschedule, and we mark
             # this down as an infrastructural failure. Note that this state may not mean that the
@@ -679,6 +682,7 @@ class ChangesScheduler(Scheduler):
           any tasks launched on this slave on a new slave.
         """
         logging.warn("Slave lost: %s", slaveId.value)
+        self._stats.incr('slave_lost')
 
     def executorLost(self, driver, executorId, slaveId, status):
         """

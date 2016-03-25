@@ -20,6 +20,7 @@ except ImportError:
     import mesos_pb2
 
 from changes_mesos_scheduler.changes_scheduler import ChangesScheduler, APIError, FileBlacklist, ChangesAPI
+from changes_mesos_scheduler import statsreporter
 
 def _noop_blacklist():
     """Returns a blacklist instance that behaves like an empty blacklist."""
@@ -142,7 +143,6 @@ class ChangesSchedulerTest(TestCase):
         driver.declineOffer.assert_called_once_with(offer.id)
         assert api.allocate_jobsteps.call_count == 0
 
-
     def test_blacklist_maintenance(self):
         api = mock.Mock(spec=ChangesAPI)
         now = time.time()
@@ -222,7 +222,7 @@ class ChangesSchedulerTest(TestCase):
         api.post_allocate_jobsteps.return_value = post_allocate_jobsteps_return
 
         # Actually run the test logic.
-        stats = mock.Mock()
+        stats = mock.MagicMock(spec=statsreporter.Stats)
         cs = ChangesScheduler(state_file=None, api=api, stats=stats,
                               blacklist=_noop_blacklist())
         driver = mock.Mock()
@@ -252,6 +252,14 @@ class ChangesSchedulerTest(TestCase):
         driver = mock.Mock()
         cs.error(driver, 'message')
         stats.incr.assert_called_once_with('errors')
+
+    def test_slaveLost_stats(self):
+        stats = mock.Mock()
+        cs = ChangesScheduler(state_file=None, api=mock.Mock(), stats=stats,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+        cs.slaveLost(driver, mesos_pb2.SlaveID(value="slaveid"))
+        stats.incr.assert_called_once_with('slave_lost')
 
     def test_api_error(self):
         api = mock.Mock(spec=ChangesAPI)
