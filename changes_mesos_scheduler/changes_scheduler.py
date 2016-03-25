@@ -11,7 +11,7 @@ import urllib2 # type: ignore
 
 from changes_mesos_scheduler import statsreporter
 
-from typing import Any, Set, Tuple, Callable
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 from collections import defaultdict
 from threading import Event
@@ -36,15 +36,17 @@ class FileBlacklist(object):
     def __init__(self, path):
         # type: (str) -> None
         self._path = path # type: str
-        self._mtime = 0
+        self._mtime = 0.0
         self._blacklist = set() # type: Set[str]
 
     def refresh(self):
+        # type: () -> None
         """Refresh the blacklist if the file changed."""
         if os.path.getmtime(self._path) > self._mtime:
             self._refresh()
 
     def _refresh(self):
+        # type: () -> None
         """Unconditionally refresh the blacklist from the file."""
         logging.info('Refreshing blacklist')
         self._mtime = os.path.getmtime(self._path)
@@ -74,10 +76,12 @@ class ChangesAPI(object):
     """
 
     def __init__(self, api_url):
+        # type: (str) -> None
         self._api_url = api_url
 
     @staticmethod
     def make_url(base_url, path, get_params=None):
+        # type: (str, str, Optional[Dict[str,str]]) -> str
         # Changes insists that paths end with a slash
         path = path if path.endswith('/') else path + '/'
         # Make sure there's exactly one slash between path and the API url
@@ -90,6 +94,7 @@ class ChangesAPI(object):
         return full_url
 
     def _api_request(self, path, body=None, get_params=None):
+        # type: (str, Optional[Dict[str, Any]], Optional[Dict[str, Any]]) -> Dict[str, Any]
         full_url = ChangesAPI.make_url(self._api_url, path, get_params)
         try:
             data = json.dumps(body) if body else None
@@ -105,41 +110,48 @@ class ChangesAPI(object):
             raise APIError("Error POSTing to Changes at %s" % full_url, exc)
 
     def get_allocate_jobsteps(self, limit=None, cluster=None):
+        # type: (Optional[int], Optional[str]) -> List[Dict[str, Any]]
         """ Returns a list of up to `limit` pending allocation jobsteps in `cluster`.
             The scheduler may then allocate these as it sees fit.
 
         Args:
-            limit (Optional[int]): maximum jobsteps to return
-            cluster (Optional[str]): cluster to look in. The "default" cluster
+            limit: maximum jobsteps to return
+            cluster: cluster to look in. The "default" cluster
                 returns jobsteps with no cluster specified.
 
         Returns:
             list: List of JobSteps (in priority order) that are pending allocation
         """
-        data = {'limit': limit} if limit else {}
+        data = {'limit': limit} if limit else {} # type: Dict[str, Any]
         if cluster:
             data['cluster'] = cluster
         return self._api_request("/jobsteps/allocate/", get_params=data)['jobsteps']
 
     def post_allocate_jobsteps(self, jobstep_ids, cluster=None):
+        # type: (List[str], Optional[str]) -> List[str]
         """ Attempt to allocate the given list of JobStep ids.
 
         Args:
-            jobstep_ids (list): list of JobStep ID hexs to allocate.
-            cluster (Optional[str]): cluster to allocate in.
+            jobstep_ids: list of JobStep ID hexs to allocate.
+            cluster: cluster to allocate in.
+        
+        Returns:
+            list: list of jobstep ID hexs that were actually allocated.
         """
-        data = {'jobstep_ids': jobstep_ids}
+        data = {'jobstep_ids': jobstep_ids} # type: Dict[str, Any]
         if cluster:
             data['cluster'] = cluster
         return self._api_request("/jobsteps/allocate/", data)['allocated']
 
     def update_jobstep(self, jobstep_id, status, result=None, hostname=None):
+        # type: (str, str, Optional[str], Optional[str]) -> None
         """ Update the recorded status and possibly result of a JobStep in Changes.
 
         Args:
-            jobstep_id (str): JobStep ID.
-            status (str): Status (one of "finished", "queued", "in_progress").
-            result (str): Optionally one of 'failed', 'passed', 'aborted', 'skipped', or 'infra_failed'.
+            jobstep_id: JobStep ID.
+            status: Status (one of "finished", "queued", "in_progress").
+            result: Optionally one of 'failed', 'passed', 'aborted', 'skipped', or 'infra_failed'.
+            hostname: Optional hostname of slave we are running this jobstep on
         """
         data = {"status": status}
         if result:
@@ -149,10 +161,11 @@ class ChangesAPI(object):
         self._api_request("/jobsteps/{}/".format(jobstep_id), data)
 
     def jobstep_console_append(self, jobstep_id, text):
+        # type: (str, str) -> None
         """ Append to the JobStep's console log.
         Args:
-            jobstep_id (str): JobStep ID.
-            text (str): Text to append.
+            jobstep_id: JobStep ID.
+            text: Text to append.
         """
         url = '/jobsteps/%s/logappend/' % jobstep_id
         self._api_request(url, {'source': 'console', 'text': text})
@@ -160,6 +173,7 @@ class ChangesAPI(object):
 
 class ChangesScheduler(Scheduler):
     def __init__(self, state_file, api, blacklist, stats=None, changes_request_limit=200):
+        # type: (str, ChangesAPI, FileBlacklist, Optional[Any], int) -> None
         """
         Args:
             state_file (str): Path where serialized internal state will be stored.
@@ -167,9 +181,9 @@ class ChangesScheduler(Scheduler):
             blacklist (FileBlacklist): Blacklist to use.
             stats (statsreporter.Stats): Optional Stats instance to use.
         """
-        self.framework_id = None
+        self.framework_id = None # type: Optional[str]
         self._changes_api = api
-        self.taskJobStepMapping = {}
+        self.taskJobStepMapping = {} # type: Dict[str, str]
         self.tasksLaunched = 0
         self.tasksFinished = 0
         self.shuttingDown = Event()
@@ -180,13 +194,13 @@ class ChangesScheduler(Scheduler):
         self._blacklist.refresh()
         self.state_file = state_file
         self.changes_request_limit = changes_request_limit
-        self._snapshot_slave_map = defaultdict(lambda: defaultdict(float))
+        self._snapshot_slave_map = defaultdict(lambda: defaultdict(float)) # type: Dict[str, Dict[str, float]]
 
         # Variables to help with polling Changes for pending jobsteps in a
         # separate thread. _cached_pb_offers_lock protects _cached_pb_offers.
         self._cached_pb_offers_lock = threading.Lock()
-        self._cached_pb_offers = {}
-        self._polling_thread = None
+        self._cached_pb_offers = {} # type: Dict[str, mesos_pb2.Offer]
+        self._polling_thread = None # type: threading.Thread
 
         # Restore state from a previous run
         if not self.state_file:
