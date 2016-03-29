@@ -757,3 +757,67 @@ class ChangesSchedulerTest(TestCase):
         # least-loaded.
         cs.wait_for_shutdown(driver)
         driver.declineOffer.assert_called_once_with(offer1.id)
+
+    def test_cached_offer_is_used(self):
+        api = mock.Mock(spec=ChangesAPI)
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        # Scheduler has an offer, but no tasks.
+        api.get_allocate_jobsteps.return_value = []
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        _sync_resource_offers(cs, driver, [offer1])
+        assert api.get_allocate_jobsteps.call_count == 1
+        assert api.post_allocate_jobsteps.call_count == 0
+
+        cs.wait_for_shutdown(driver)
+        api.reset_mock()
+        driver.reset_mock()
+
+        # When an offer arrives, the scheduler uses on the cached offer.
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('2', cpus=2, snapshot='snapfoo')
+        ]
+        api.post_allocate_jobsteps.return_value = ['2']
+        _sync_resource_offers(cs, driver, [])
+        assert api.get_allocate_jobsteps.call_count == 1
+        assert api.post_allocate_jobsteps.call_count == 1
+
+        cs.wait_for_shutdown(driver)
+        driver.declineOffer.assert_not_called()
+
+    def test_offer_rescinded(self):
+        api = mock.Mock(spec=ChangesAPI)
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        # Scheduler has an offer, but no tasks are available.
+        api.get_allocate_jobsteps.return_value = []
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        _sync_resource_offers(cs, driver, [offer1])
+        assert api.get_allocate_jobsteps.call_count == 1
+        assert api.post_allocate_jobsteps.call_count == 0
+
+        cs.wait_for_shutdown(driver)
+        api.reset_mock()
+        driver.reset_mock()
+
+        # Offer gets rescinded by Mesos master.
+        cs.offerRescinded(driver, offer1.id)
+        api.get_allocate_jobsteps.assert_not_called()
+        api.reset_mock()
+        driver.reset_mock()
+        
+        # Now changes has no offers, so the task can't be scheduled.
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('2', cpus=2, snapshot='snapfoo')
+        ]
+        _sync_resource_offers(cs, driver, [])
+        # No offers -> no clusters to query for -> no get_allocate_jobsteps calls.
+        assert api.get_allocate_jobsteps.call_count == 0  
+        assert api.post_allocate_jobsteps.call_count == 0
+
+        cs.wait_for_shutdown(driver)
+        driver.declineOffer.assert_not_called()

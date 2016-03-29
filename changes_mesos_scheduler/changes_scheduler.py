@@ -774,7 +774,7 @@ class ChangesScheduler(Scheduler):
         """
         logging.info("Offer rescinded: %s", offerId.value)
         with self._cached_pb_offers_lock:
-            del(self._cached_pb_offers[offerId])
+            del(self._cached_pb_offers[offerId.value])
 
     def statusUpdate(self, driver, status):
         """
