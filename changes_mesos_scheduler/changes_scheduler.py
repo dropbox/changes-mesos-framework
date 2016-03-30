@@ -196,10 +196,9 @@ class ChangesScheduler(Scheduler):
         self._snapshot_slave_map = defaultdict(lambda: defaultdict(float)) # type: Dict[str, Dict[str, float]]
 
         # Variables to help with polling Changes for pending jobsteps in a
-        # separate thread. _cached_pb_offers_lock protects _cached_pb_offers.
-        self._cached_pb_offers_lock = threading.Lock()
-        self._cached_pb_offers = {} # type: Dict[str, mesos_pb2.Offer]
-        self._polling_thread = None # type: threading.Thread
+        # separate thread. _cached_slaves_lock protects _cached_slaves.
+        self._cached_slaves_lock = threading.Lock()
+        self._cached_slaves = {} # type: Dict[str, ChangesScheduler.Slave]
 
         # Restore state from a previous run
         if not self.state_file:
@@ -299,24 +298,28 @@ class ChangesScheduler(Scheduler):
         #  8) Clear state.pending_assignments and write state file.
         #
         #  9) On startup, jobstep_deallocate any state.pending_assignments
-        with self._cached_pb_offers_lock:
-            # Get all offers
-            pb_offers = self._cached_pb_offers.values()
-            offers_by_cluster = self._usable_offers_by_cluster(pb_offers)
+        with self._cached_slaves_lock:
+            # Get all slaves (composites of individual offers on the same host)
+            all_slaves = self._cached_slaves.values()
+            filtered_slaves = self._filter_slaves(all_slaves)
+            logging.info("Do scheduling cycle with %d available slaves. (%d " +
+                         "after filtering)",
+                         len(all_slaves), len(filtered_slaves))
+            slaves_by_cluster = self._slaves_by_cluster(filtered_slaves)
 
             # Get all jobsteps, organized by cluster.
             jobsteps_by_cluster = self._query_changes_for_jobsteps(
-                    driver, offers_by_cluster.keys())
+                    driver, slaves_by_cluster.keys())
 
-            # For each cluster, assign jobsteps to offers, then launch the
-            # jobsteps.
+            # For each cluster, assign jobsteps to slaves, then launch the
+            # jobsteps on those slaves, using multiple offers if necessary.
             for cluster, jobsteps in jobsteps_by_cluster.iteritems():
                 self._assign_jobsteps(cluster,
-                                      offers_by_cluster[cluster],
+                                      slaves_by_cluster[cluster],
                                       jobsteps_by_cluster[cluster])
                 self._launch_jobsteps(driver,
                                       cluster,
-                                      offers_by_cluster[cluster])
+                                      slaves_by_cluster[cluster])
 
         # Guess whether or not there are more jobsteps waiting on Changes by
         # comparing the number of jobsteps received vs. the number of jobsteps
@@ -327,11 +330,12 @@ class ChangesScheduler(Scheduler):
         # type: (SchedulerDriver) -> None
         """Decline all cached Mesos pb_offers.
         """
-        with self._cached_pb_offers_lock:
-            pb_offers = self._cached_pb_offers.values()
-            self._stat_and_log_list(pb_offers, 'decline_for_shutdown',
-                                    lambda offer: "Shutting down, declining offer: %s" % offer.id)
-            self._decline_list(driver, pb_offers)
+        with self._cached_slaves_lock:
+            slaves = self._cached_slaves.values()
+            for slave in slaves:
+                self._stat_and_log_list(slave.offers(), 'decline_for_shutdown',
+                                        lambda offer: "Shutting down, declining offer: %s" % offer.offer.id)
+                self._decline_list(driver, slave.offers())
 
     def registered(self, driver, frameworkId, masterInfo):
         """
@@ -396,52 +400,271 @@ class ChangesScheduler(Scheduler):
                 [ChangesScheduler._decode_resource(r) for r in offer.resources]}
 
     class OfferWrapper(object):
-        """ Wrapper around a protobuf Offer object. Provides numerous
-        conveniences including comparison (we currently use a least loaded
-        approach), and being able to assign jobsteps to the offer.
+        """Precompute some commonly-used fields from a Mesos Offer proto.
         """
-        def __init__(self, offer):
-            self.offer = offer
-            self.hostname = offer.hostname
-            self.reset_state()
+        def __init__(self, pb_offer):
+            # type: (Any) -> None
+            self.offer = pb_offer
+            self.cluster = ChangesScheduler.get_cluster(pb_offer)
 
-        def reset_state(self):
-            resources = ChangesScheduler.get_resources(self.offer)
-            self.cpus = resources.get('cpus', 0)
-            self.memory = resources.get('mem', 0)
-            self.jobsteps = []
+            resources = ChangesScheduler.get_resources(pb_offer)
+            self.cpu = resources.get('cpus', 0.0)
+            self.mem = resources.get('mem', 0)
 
         def __cmp__(self, other):
+            # type: (ChangesScheduler.OfferWrapper) -> int
+            """Comparator for sorting offers by "least loaded".
+            """
             # we prioritize first by cpu then memory.
             # (values are negated so more resources sorts as "least loaded")
-            us = (-self.cpus, -self.memory)
-            them = (-other.cpus, -other.memory)
+            us = (-self.cpu, -self.mem)
+            them = (-other.cpu, -other.mem)
             if us < them:
                 return -1
             return 0 if us == them else 1
 
-        def cluster(self):
-            return ChangesScheduler.get_cluster(self.offer)
+        def __str__(self, pb_offer):
+            cpu = "?"
+            mem = "?"
+            for r in pb_offer.resources:
+                if r.name == 'cpus':
+                    cpu = str(r.scalar).strip()
+                if r.name == 'memory':
+                    cpu = str(r.scalar).strip()
+            return "Offer({} {} {} cpu: {}  mem: {})".format(
+                    pb_offer.id.value, pb_offer.slave_id.value,
+                    pb_offer.hostname, cpu, mem)
+
+    class Slave(object):
+        """ Wrapper around a protobuf Offer object. Provides numerous
+        conveniences including comparison (we currently use a least loaded
+        approach), and being able to assign jobsteps to the offer.
+        """
+        def __init__(self, slave_id, hostname, cluster):
+            # type: (str, str, str) -> None
+            self.slave_id = slave_id
+            self.hostname = hostname
+            self.cluster = cluster
+
+            self._offers = {} # type: Dict[str, ChangesScheduler.OfferWrapper]
+            self.jobsteps_assigned = []  # type: List[Dict[str, Any]]
+
+            # Sum of all Offer resources for this slave.
+            self.total_cpu = 0.0
+            self.total_mem = 0
+
+            # Sum of all resources for jobsteps assigned to this slave.
+            self.allocated_cpu = 0.0
+            self.allocated_mem = 0
+
+        def offers(self):
+            # type: () -> List[ChangesScheduler.OfferWrapper]
+            """Returns a list of available offers on the slave.
+            """
+            return self._offers.values()
+
+        def has_offers(self):
+            # type: () -> bool
+            """Returns True if the slave has any available offers, False
+            otherwise.
+            """
+            return len(self._offers) > 0
+
+        def is_maintenanced(self, now_nanos):
+            # type: (int) -> bool
+            """Determine if a Mesos offer indicates that a maintenance window is
+            in progress for the slave. Treat the slave as maintenanced if ANY
+            offer has an active maintenance window.
+            Args:
+                now_nanos: Timestamp of right now in nanoseconds, for comparing
+                    to the offer's (optional) maintenance time window.
+            Returns:
+                True if the offer is in the maintenance window, False otherwise.
+            """
+            is_maintenanced = False
+            for offer in self._offers.itervalues():
+                if not offer.offer.HasField('unavailability'):
+                    continue
+                start_time = offer.offer.unavailability.start.nanoseconds
+
+                # If "duration" is not present use a default value of anything
+                # greater than Now, to represent an unbounded maintenance time.
+                # Override this with an actual end time if the "duration" field
+                # is present in the protobuf.
+                end_time = now_nanos + 1
+                if (offer.offer.unavailability.HasField('duration')):
+                    end_time = start_time + offer.offer.unavailability.duration.nanoseconds
+
+                is_maintenanced = now_nanos > start_time and now_nanos < end_time
+                if is_maintenanced:
+                    logging.info("%s is maintenanced", self.hostname)
+                    break
+            return is_maintenanced
+
+        def add_offer(self, offer):
+            # type: (ChangesScheduler.OfferWrapper) -> None
+            """Add an offer to this slave, and add its resources to the slave's
+            total resources.
+            """
+            if (offer.offer.slave_id.value != self.slave_id or
+                offer.offer.hostname != self.hostname or
+                offer.cluster != self.cluster):
+                logging.error("A mismatched offer got mixed in with the wrong " +
+                              "slave. Skipping. (\n  Slave: %s\n  Offer: %s)",
+                              self, offer)
+                return
+
+            self.total_cpu += offer.cpu
+            self.total_mem += offer.mem
+            logging.info("Slave %s: Add new offer +%f cpu,  +%d mem (-> %f %d)",
+                         self.hostname, offer.cpu, offer.mem, self.total_cpu,
+                         self.total_mem)
+            self._offers[offer.offer.id.value] = offer
+
+        def remove_offer(self, offer_id):
+            # type: (Any) -> None
+            """Remove an offer and its resources from this slave.
+            Args:
+                offer_id: mesos_pb2.OfferId
+            """
+            offer = self._offers.get(offer_id.value)
+            if offer:
+                del(self._offers[offer_id.value])
+                self.total_cpu -= offer.cpu
+                self.total_mem -= offer.mem
+
+        def offers_to_launch(self):
+            # type: () -> List[ChangesScheduler.OfferWrapper]
+            """Based on the jobsteps previously assigned, select the offers on
+            which to allocate the jobsteps.
+            Also, remove from the Slave all offers which are about to be
+            launched, and decrement total resources appropriately.
+            Returns:
+                A list of OfferWrappers representing the set of offers on which
+                the tasks should be scheduled. All returned OfferWrappers
+                should have the same slave ID and hostname.
+            """
+            current_offers = sorted(self._offers.values())
+
+            offers_to_launch = []
+            for offer in current_offers:
+                # Decrement the "remaining" resources fields as we choose
+                # offers to allocate to the jobsteps.
+                if (self.allocated_cpu > 0 and offer.cpu > 0 or
+                    self.allocated_mem > 0 and offer.mem > 0):
+                    offers_to_launch.append(offer.offer.id)
+                    self.allocated_cpu -= offer.cpu
+                    self.allocated_mem -= offer.mem
+                    self.remove_offer(offer.offer.id)
+            return offers_to_launch
+
+        def tasks_to_launch(self):
+            # type: () -> Tuple[List[Any], List[str]]
+            """Generate list of mesos_pb2.Task to launch, and a second list of
+            jobstep IDs corresponding to each task.
+            Also, reset/clear jobsteps_assigned on the Slave.
+            Returns:
+                (list of tasks, list of jobstep IDs)
+            """
+            tasks = []
+            jobstep_ids = []
+            for jobstep in self.jobsteps_assigned:
+                tasks.append(self._jobstep_to_task(jobstep))
+                jobstep_ids.append(jobstep['id'])
+
+            self.unassign_jobsteps()
+            return tasks, jobstep_ids
+
+        def unassign_jobsteps(self):
+            # type: () -> None
+            """Clear all assigned jobsteps from the Slave and reset required
+            resources.
+            """
+            self.jobsteps_assigned = []
+            self.allocated_cpu = 0.0
+            self.allocated_mem = 0
+
+        def __cmp__(self, other):
+            # type: (ChangesScheduler.Slave) -> int
+            # we prioritize first by cpu then memory.
+            # (values are negated so more resources sorts as "least loaded")
+            us = (-(self.total_cpu - self.allocated_cpu),
+                  -(self.total_mem - self.allocated_mem))
+            them = (-(other.total_cpu - other.allocated_cpu),
+                    -(other.total_mem - other.allocated_mem))
+            if us < them:
+                return -1
+            return 0 if us == them else 1
+
+        def __str__(self, slave):
+            return "Slave({}: {} offers, {} acpu, {} amem)".format(
+                    slave.hostname, len(slave.offers()), slave.total_cpu,
+                    slave.total_mem)
 
         def has_resources_for(self, jobstep):
-            return self.cpus >= jobstep['resources']['cpus'] and self.memory >= jobstep['resources']['mem']
+            # type: (Dict[str, Any]) -> bool
+            """Returns true if the slave has sufficient available resources to
+            execute a jobstep, false otherwise.
+            Args:
+                jobstep: The jobstep to execute.
+            Returns:
+                True if the slave can host the jobstep.
+            """
+            return ((self.total_cpu - self.allocated_cpu) >= jobstep['resources']['cpus'] and
+                    (self.total_mem - self.allocated_mem) >= jobstep['resources']['mem'])
 
-        def commit_resources_for(self, jobstep):
+        def assign_jobstep(self, jobstep):
+            # type: (Dict[str, Any]) -> None
+            """Tentatively assign a jobstep to run on this slave. The actual
+            launching occurs elsewhere.
+            """
             assert self.has_resources_for(jobstep)
-            self.cpus -= jobstep['resources']['cpus']
-            self.memory -= jobstep['resources']['mem']
+            self.allocated_cpu += jobstep['resources']['cpus']
+            self.allocated_mem += jobstep['resources']['mem']
+            self.jobsteps_assigned.append(jobstep)
 
-        def has_resources(self):
-            return self.cpus > 0 and self.memory > 0
+        def _jobstep_to_task(self, jobstep):
+            # type: (Dict[str, Any]) -> Any
+            """ Given a jobstep and an offer to assign it to, returns the TaskInfo
+            protobuf for the jobstep and updates scheduler state accordingly.
+            Args:
+                jobstep: The jobstep to convert to a task.
+            Returns:
+                mesos_pb2.Task
+            """
+            tid = uuid4().hex
+            logging.info("Accepting offer on %s to start task %s", self.hostname, tid)
 
-        def add_jobstep(self, jobstep):
-            self.commit_resources_for(jobstep)
-            self.jobsteps.append(jobstep)
+            task = mesos_pb2.TaskInfo()
+            task.name = "{} {}".format(
+                jobstep['project']['slug'],
+                jobstep['id'],
+            )
+            task.task_id.value = str(tid)
+            task.slave_id.value = self.slave_id
 
-        def remove_all_jobsteps(self):
-            self.reset_state()
+            task.labels.labels.add(key="hostname", value=self.hostname)
+            task.labels.labels.add(key="jobstep_id", value=jobstep['id'])
+
+            cmd = jobstep["cmd"]
+
+            task.command.value = cmd
+            logging.debug("Scheduling cmd: %s", cmd)
+
+            cpus = task.resources.add()
+            cpus.name = "cpus"
+            cpus.type = mesos_pb2.Value.SCALAR
+            cpus.scalar.value = jobstep["resources"]["cpus"]
+
+            mem = task.resources.add()
+            mem.name = "mem"
+            mem.type = mesos_pb2.Value.SCALAR
+            mem.scalar.value = jobstep["resources"]["mem"]
+
+            return task
 
     def _get_slaves_for_snapshot(self, snapshot_id, recency_threshold_hours=12):
+        # type: (str, int) -> List[str]
         """ Returns list of hostnames which have run tasks with a given
         snapshot_id recently.
         """
@@ -451,45 +674,6 @@ class ChangesScheduler(Scheduler):
 
     def _associate_snapshot_with_slave(self, snapshot_id, slave):
         self._snapshot_slave_map[snapshot_id][slave] = time.time()
-
-    def _jobstep_to_task(self, offer, jobstep):
-        """ Given a jobstep and an offer to assign it to, returns the TaskInfo
-        protobuf for the jobstep and updates scheduler state accordingly.
-        """
-        tid = uuid4().hex
-        self.tasksLaunched += 1
-
-        logging.info("Accepting offer on %s to start task %s", offer.hostname, tid)
-
-        task = mesos_pb2.TaskInfo()
-        task.name = "{} {}".format(
-            jobstep['project']['slug'],
-            jobstep['id'],
-        )
-        task.task_id.value = str(tid)
-        task.slave_id.value = offer.slave_id.value
-
-        task.labels.labels.add(key="hostname", value=offer.hostname)
-        task.labels.labels.add(key="jobstep_id", value=jobstep['id'])
-
-        cmd = jobstep["cmd"]
-
-        task.command.value = cmd
-        logging.debug("Scheduling cmd: %s", cmd)
-
-        cpus = task.resources.add()
-        cpus.name = "cpus"
-        cpus.type = mesos_pb2.Value.SCALAR
-        cpus.scalar.value = jobstep["resources"]["cpus"]
-
-        mem = task.resources.add()
-        mem.name = "mem"
-        mem.type = mesos_pb2.Value.SCALAR
-        mem.scalar.value = jobstep["resources"]["mem"]
-
-        self.taskJobStepMapping[task.task_id.value] = jobstep['id']
-
-        return task
 
     @staticmethod
     def _jobstep_snapshot(jobstep):
@@ -502,7 +686,7 @@ class ChangesScheduler(Scheduler):
         return None
 
     def _fetch_jobsteps(self, cluster):
-        # type: (str) -> List[Dict[str, str]]
+        # type: (str) -> List[Dict[str, Any]]
         """Query Changes for all allocatable jobsteps for the specified cluster.
         """
         try:
@@ -514,13 +698,13 @@ class ChangesScheduler(Scheduler):
             possible_jobsteps = []
         return possible_jobsteps
 
-    def _assign_jobsteps(self, cluster, offers_for_cluster, jobsteps_for_cluster):
-        # type: (str, List[Any], List[Dict[str, str]]) -> List[str]
+    def _assign_jobsteps(self, cluster, slaves_for_cluster, jobsteps_for_cluster):
+        # type: (str, List[ChangesScheduler.Slave], List[Dict[str, Any]]) -> None
         """Make assignments for jobsteps for a cluster to offers for a cluster.
         Assignments are stored in the OfferWrapper, to be launched later.
         Args:
             cluster: The cluster to make assignments for.
-            offers_for_cluster: A list of offers for the cluster.
+            slaves_for_cluster: A list of offers for the cluster.
             jobsteps_for_cluster: A list of jobsteps for the cluster.
         """
         # Changes returns JobSteps in priority order, so for each one
@@ -529,78 +713,51 @@ class ChangesScheduler(Scheduler):
         # optimal algorithm--it might allocate fewer jobsteps than is possible,
         # and it currently prioritizes cpu over memory. We don't believe this
         # to be an issue currently, but it may be worth improving in the future
-        sorted_offers = sorted(offers_for_cluster)
-        for jobstep in jobsteps_for_cluster:
-            if len(sorted_offers) == 0:
-                break
-            offer_to_use = None
+        if len(slaves_for_cluster) == 0 or len(jobsteps_for_cluster) == 0:
+            return
 
+        logging.info("Assign %s jobsteps on cluster %s", len(jobsteps_for_cluster), cluster)
+        sorted_slaves = sorted(slaves_for_cluster)
+
+        for jobstep in jobsteps_for_cluster:
+            slave_to_use = None
             snapshot_id = self._jobstep_snapshot(jobstep)
             # Disable proximity check if not using a snapshot or scheduling in an explicit cluster.
             # Clusters are expected to pre-populate snapshots out of band and will not benefit
             # from proximity checks.
             if snapshot_id and not cluster:
-                logging.info('Scanning for slaves containing snapshot: %s', snapshot_id)
-
                 slaves_with_snapshot = self._get_slaves_for_snapshot(snapshot_id)
-                logging.info('Checking if any slaves known to have snapshot were offered: %s',
-                             slaves_with_snapshot)
+                logging.info('Found slaves with snapshot id %s: %s',
+                             snapshot_id, slaves_with_snapshot)
 
                 if len(slaves_with_snapshot) > 0:
-                    for offer in sorted_offers:
-                        if offer.hostname in slaves_with_snapshot:
-                            if offer.has_resources_for(jobstep):
-                                offer_to_use = offer
-                                logging.info('Scheduling jobstep %s on slave %s which might have snapshot %s',
-                                             jobstep, offer.hostname, snapshot_id)
-                                break
+                    for slave in sorted_slaves:
+                        if (slave.hostname in slaves_with_snapshot and
+                            slave.has_resources_for(jobstep)):
+                            slave_to_use = slave
+                            logging.info('Scheduling jobstep %s on slave %s which might have snapshot %s',
+                                         jobstep, slave.hostname, snapshot_id)
+                            break
 
             # If we couldn't find a slave which is likely to have the snapshot already,
-            # this gives us the least-loaded offer that we could actually use for this jobstep
-            if not offer_to_use:
-                for offer in sorted_offers:
-                    if offer.has_resources_for(jobstep):
-                        offer_to_use = offer
+            # this gives us the least-loaded slave that we could actually use for this jobstep
+            if not slave_to_use:
+                for slave in sorted_slaves:
+                    if slave.has_resources_for(jobstep):
+                        slave_to_use = slave
                         break
 
-            # couldn't find any offers that would support this jobstep, move on
-            if not offer_to_use:
+            # couldn't find any slaves that would support this jobstep, move on
+            if not slave_to_use:
+                logging.warning("No slave found to run jobstep %s.", jobstep)
                 continue
 
-            sorted_offers.remove(offer_to_use)
+            sorted_slaves.remove(slave_to_use)
             if snapshot_id:
-                self._associate_snapshot_with_slave(snapshot_id, offer_to_use.hostname)
+                self._associate_snapshot_with_slave(snapshot_id, slave_to_use.hostname)
 
-            offer_to_use.add_jobstep(jobstep)
-            if offer_to_use.has_resources():
-                bisect.insort(sorted_offers, offer_to_use)
-
-    @staticmethod
-    def _is_maintenanced(pb_offer, now_nanos):
-        # type: (Any, int) -> bool
-        """Determine if a Mesos offer indicates that a maintenance window is in
-        progress.
-        Args:
-            pb_offer (Mesos Offer protobuf): The Offer to check
-            now_nanos: Timestamp of right now in nanoseconds, for comparing to
-                the offer's (optional) maintenance time window.
-        Returns:
-            True if the offer is in the maintenance window, False otherwise.
-        """
-        if not pb_offer.HasField('unavailability'):
-            return False
-
-        start_time = pb_offer.unavailability.start.nanoseconds
-
-        # If "duration" is not present use a default value of anything greater
-        # than Now, to represent an unbounded maintenance time. Override this
-        # with an actual end time if the "duration" field is present in the
-        # protobuf.
-        end_time = now_nanos + 1
-        if (pb_offer.unavailability.HasField('duration')):
-            end_time = start_time + pb_offer.unavailability.duration.nanoseconds
-
-        return now_nanos > start_time and now_nanos < end_time
+            slave_to_use.assign_jobstep(jobstep)
+            bisect.insort(sorted_slaves, slave_to_use)
 
     def _stat_and_log_list(self, to_decline, stats_counter_name, reason_func):
         # type: (List[Any], str, Callable[[Any], str]) -> None
@@ -613,9 +770,9 @@ class ChangesScheduler(Scheduler):
                 a logging string, to explain why this offer was declined.
         """
         self._stats.incr(stats_counter_name, len(to_decline))
-        for pb_offer in to_decline:
+        for offer in to_decline:
             if reason_func:
-                logging.info(reason_func(pb_offer))
+                logging.info(reason_func(offer))
 
     def _decline_list(self, driver, to_decline):
         # type: (SchedulerDriver, List[Any]) -> None
@@ -624,10 +781,10 @@ class ChangesScheduler(Scheduler):
             driver: the MesosSchedulerDriver object
             to_decline: The list of offers to decline
         """
-        for pb_offer in to_decline:
-            driver.declineOffer(pb_offer.id)
+        for offer in to_decline:
+            driver.declineOffer(offer.offer.id)
 
-    def _filter_offers(self, pb_offers):
+    def _filter_slaves(self, slaves):
         # type: (List[Any]) -> List[Any]
         """Given a list of offer protos, decline blacklisted or unusable
         offers. Return a list of usable offers.
@@ -640,61 +797,72 @@ class ChangesScheduler(Scheduler):
         self._blacklist.refresh()
         now_nanos = int(time.time() * 1000000000)
         maintenanced, blacklisted, usable = [], [], []
-        for pb_offer in pb_offers:
-            if ChangesScheduler._is_maintenanced(pb_offer, now_nanos):
-                maintenanced.append(pb_offer)
-            elif self._blacklist.contains(pb_offer.hostname):
-                blacklisted.append(pb_offer)
+        for slave in slaves:
+            if slave.is_maintenanced(now_nanos):
+                maintenanced.append(slave)
+            elif self._blacklist.contains(slave.hostname):
+                blacklisted.append(slave)
             else:
-                usable.append(pb_offer)
+                usable.append(slave)
 
         self._stat_and_log_list(maintenanced, 'ignore_for_maintenance',
-                                lambda pb_offer: "Ignoring offer from maintenanced hostname: %s" % pb_offer.hostname)
+                                lambda slave: "Ignoring slave from maintenanced hostname: %s" % slave.hostname)
         self._stat_and_log_list(blacklisted, 'ignore_for_blacklist',
-                                lambda pb_offer: "Ignoring offer from blacklisted hostname: %s" % pb_offer.hostname)
+                                lambda slave: "Ignoring slave from blacklisted hostname: %s" % slave.hostname)
         return usable
 
-    def _launch_jobsteps(self, driver, cluster, offers_for_cluster):
-        # type: (SchedulerDriver, str, List[OfferWrapper]) -> None
+    def _launch_jobsteps(self, driver, cluster, slaves_for_cluster):
+        # type: (SchedulerDriver, str, List[ChangesScheduler.Slave]) -> None
         """Given a list of offers, launch all jobsteps assigned on each offer.
         Remove from the Offers cache any used offers.
         Args:
             driver: the MesosSchedulerDriver object
-            offers_for_cluster: A list of offers with assigned jobsteps already
+            slaves_for_cluster: A list of offers with assigned jobsteps already
                 embedded. Launch the jobsteps on the offer.
         """
-        if len(offers_for_cluster) == 0:
+        if len(slaves_for_cluster) == 0:
             return
 
         # Inform Changes of where the jobsteps are going.
-        to_allocate = []
-        for offer in offers_for_cluster:
-            jobstep_ids = [jobstep['id'] for jobstep in offer.jobsteps]
-            to_allocate.extend(jobstep_ids)
+        jobsteps_to_allocate = []
+        for slave in slaves_for_cluster:
+            jobstep_ids = [jobstep['id'] for jobstep in slave.jobsteps_assigned]
+            jobsteps_to_allocate.extend(jobstep_ids)
 
-        if len(to_allocate) == 0:
+        if len(jobsteps_to_allocate) == 0:
             return
 
         try:
-            allocated_ids = self._changes_api.post_allocate_jobsteps(
-                    to_allocate, cluster=cluster)
+            jobsteps_to_allocate.sort()  # Make testing deterministic.
+            allocated_jobstep_ids = self._changes_api.post_allocate_jobsteps(
+                    jobsteps_to_allocate, cluster=cluster)
         except APIError:
-            allocated_ids = []
-        if sorted(allocated_ids) != sorted(to_allocate):
+            allocated_jobstep_ids = []
+        if sorted(allocated_jobstep_ids) != sorted(jobsteps_to_allocate):
             # NB: cluster could be None here
             logging.warning("Could not successfully allocate for cluster: %s", cluster)
             # for now we just give up on this cluster entirely
-            for offer in offers_for_cluster:
-                offer.remove_all_jobsteps()
+            for slave in slaves_for_cluster:
+                slave.unassign_jobsteps()
 
         # we've allocated all the jobsteps we can, now we launch them
-        for offer in offers_for_cluster:
-            if len(offer.jobsteps) > 0:
-                tasks = [self._jobstep_to_task(offer.offer, jobstep) for jobstep in offer.jobsteps]
-                filters = mesos_pb2.Filters()
-                filters.refuse_seconds = 1.0
-                driver.launchTasks(offer.offer.id, tasks, filters)
-                del(self._cached_pb_offers[offer.offer.id.value])
+        for slave in slaves_for_cluster:
+            if len(slave.jobsteps_assigned) == 0:
+                continue
+            filters = mesos_pb2.Filters()
+            filters.refuse_seconds = 1.0
+
+            # Note: offers_to_launch() and tasks_to_launch() remove offers and
+            # tasks from the slave.
+            offers_to_launch = slave.offers_to_launch()
+            tasks_to_launch, jobstep_ids = slave.tasks_to_launch()
+
+            for task, jobstep_id in zip(tasks_to_launch, jobstep_ids):
+                self.taskJobStepMapping[task.task_id.value] = jobstep_id
+
+            self.tasksLaunched += len(tasks_to_launch)
+            logging.info("Launch tasks: {} offers,  {} tasks".format(len(offers_to_launch), len(tasks_to_launch)))
+            driver.launchTasks(offers_to_launch, tasks_to_launch, filters)
 
     def resourceOffers(self, driver, pb_offers):
         # type: (SchedulerDriver, List[Any]) -> None
@@ -718,36 +886,29 @@ class ChangesScheduler(Scheduler):
         # Simply add the offers to our local cache of available offers.
         # Jobsteps are allocated asynchronously, driven by
         # poll_changes_until_shutdown().
-        with self._cached_pb_offers_lock:
+        with self._cached_slaves_lock:
             for pb_offer in pb_offers:
-                self._cached_pb_offers[pb_offer.id.value] = pb_offer
+                offer = ChangesScheduler.OfferWrapper(pb_offer)
+                if pb_offer.slave_id.value not in self._cached_slaves:
+                    slave = ChangesScheduler.Slave(pb_offer.slave_id.value, 
+                                                   pb_offer.hostname,
+                                                   offer.cluster)
+                    self._cached_slaves[pb_offer.slave_id.value] = slave
+                self._cached_slaves[pb_offer.slave_id.value].add_offer(offer)
 
-    def _usable_offers_by_cluster(self, pb_offers):
-        # type: (List[Any]) -> Dict[str, List[ChangesScheduler.OfferWrapper]]
-        """Given a list of Offer protobufs, produce a collection of
-        OfferWrappers with the offers grouped by cluster (i.e. a dictionary)
-        *omitting* blacklisted, maintenced, or otherwise filtered offers.
-        Args:
-            pb_offers: The list of Offer protobufs to wrap-and-organize.
-        Returns:
-            dictionary of {cluster: [OfferWrapper, ...]}
-        """
-        usable_pb_offers = self._filter_offers(pb_offers)
-        usable_offers = [ChangesScheduler.OfferWrapper(pb_offer) for pb_offer in usable_pb_offers]
-
-        # Sort incoming offers by cluster to which they apply.
-        offers_by_cluster = defaultdict(list)  # type: Dict[str, List[ChangesScheduler.OfferWrapper]]
-        for offer in usable_offers:
-            cluster = offer.cluster()
-            offers_by_cluster[cluster].append(offer)
-        return offers_by_cluster
+    def _slaves_by_cluster(self, slaves):
+        slaves_by_cluster = defaultdict(list)
+        for slave in slaves:
+            if slave.has_offers():
+                slaves_by_cluster[slave.cluster].append(slave)
+        return slaves_by_cluster
 
     def _query_changes_for_jobsteps(self, driver, clusters):
-        # type: (SchedulerDriver, List[str]) -> Dict[str, List[Dict[str, str]]]
+        # type: (SchedulerDriver, List[str]) -> Dict[str, List[Dict[str, Any]]]
         """Query Changes for the pending jobsteps for each cluster for which we
         have offers available.
         """
-        jobsteps_by_cluster = defaultdict(list)  # type: Dict[str, List[Dict[str, str]]]
+        jobsteps_by_cluster = defaultdict(list)  # type: Dict[str, List[Dict[str, Any]]]
         for cluster in clusters:
             jobsteps = self._fetch_jobsteps(cluster)
             jobsteps_by_cluster[cluster] = jobsteps
@@ -767,8 +928,9 @@ class ChangesScheduler(Scheduler):
             offerId: a Mesos OfferId protobuf
         """
         logging.info("Offer rescinded: %s", offerId.value)
-        with self._cached_pb_offers_lock:
-            del(self._cached_pb_offers[offerId.value])
+        with self._cached_slaves_lock:
+            for slave in self._cached_slaves.itervalues():
+                slave.remove_offer(offerId)
 
     def statusUpdate(self, driver, status):
         """
@@ -858,6 +1020,12 @@ class ChangesScheduler(Scheduler):
         """
         logging.warn("Slave lost: %s", slaveId.value)
         self._stats.incr('slave_lost')
+        with self._cached_slaves_lock:
+            slave = self._cached_slaves.pop(slaveId.value, None)
+            if slave:
+                self._stat_and_log_list(slave.offers(), 'decline_for_slave_lost',
+                                        lambda offer: "Slave lost, declining offer: %s" % offer.offer.id)
+                self._decline_list(driver, slave.offers())
 
     def executorLost(self, driver, executorId, slaveId, status):
         """

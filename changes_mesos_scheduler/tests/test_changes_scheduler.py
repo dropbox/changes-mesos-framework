@@ -85,17 +85,21 @@ class ChangesSchedulerTest(TestCase):
         return status
 
     def _make_offer(self,
-                    hostname='hostname',
+                    hostname=None,
                     cpus=4,
                     mem=8192,
                     cluster=None,
                     id='offerid',
                     unavailability_start_secs=None,
                     unavailability_duration_secs=None):
+        # Offers with different IDs will have different hostnames, unless
+        # otherwise explicitly specified.
+        if hostname is None:
+            hostname = id
         offer = mesos_pb2.Offer(
             id=mesos_pb2.OfferID(value=id),
             framework_id=mesos_pb2.FrameworkID(value="frameworkid"),
-            slave_id=mesos_pb2.SlaveID(value="slaveid"),
+            slave_id=mesos_pb2.SlaveID(value="slave_id_" + hostname),
             hostname=hostname,
         )
 
@@ -306,7 +310,7 @@ class ChangesSchedulerTest(TestCase):
                                   unavailability_duration_secs=10)
 
         # Test unavailability scheduled in the past, ending in the past - ACCEPT
-        offer4 = self._make_offer(hostname='hostname_5.com',
+        offer4 = self._make_offer(hostname='hostname_4.com',
                                   id="offer_4",
                                   mem=memlimit,
                                   unavailability_start_secs=now - 20,
@@ -382,7 +386,8 @@ class ChangesSchedulerTest(TestCase):
         for launch_offer, args in zip(expected_launches,
                                       driver.launchTasks.call_args_list):
             expected_launch_set.add(launch_offer.id.value)
-            actual_launch_set.add(args[0][0].value)
+            assert len(args[0][0]) == 1  # only one OfferId in the launch args.
+            actual_launch_set.add(args[0][0][0].value)
         assert actual_launch_set == expected_launch_set
 
         # Decline any unused offers. Expect all maintenanced offers.
@@ -399,13 +404,29 @@ class ChangesSchedulerTest(TestCase):
         cs.error(driver, 'message')
         stats.incr.assert_called_once_with('errors')
 
-    def test_slaveLost_stats(self):
+    def test_slaveLost(self):
         stats = mock.Mock()
         cs = ChangesScheduler(state_file=None, api=mock.Mock(), stats=stats,
                               blacklist=_noop_blacklist())
         driver = mock.Mock()
-        cs.slaveLost(driver, mesos_pb2.SlaveID(value="slaveid"))
+
+        pb_offer = self._make_offer(hostname="hostname")
+
+        # Check removing an unrecognized slave.
+        assert len(cs._cached_slaves) == 0
+        cs.slaveLost(driver, pb_offer.slave_id)
         stats.incr.assert_called_once_with('slave_lost')
+
+        # Check removing a recognized slave.
+        cs.resourceOffers(driver, [pb_offer])
+        stats.reset_mock()
+        assert len(cs._cached_slaves) == 1
+
+        cs.slaveLost(driver, pb_offer.slave_id)
+        assert stats.incr.call_count == 2
+        stats.incr.assert_any_call('decline_for_slave_lost', 1)
+        stats.incr.assert_any_call('slave_lost')
+        assert len(cs._cached_slaves) == 0
 
     def test_api_error(self):
         api = mock.Mock(spec=ChangesAPI)
@@ -453,8 +474,9 @@ class ChangesSchedulerTest(TestCase):
 
         offer = self._make_offer(hostname='aHostname', cluster="foo_cluster")
 
-        def check_tasks(offer_id, tasks, filters):
-            assert offer_id == offer.id
+        def check_tasks(offer_ids, tasks, filters):
+            assert len(offer_ids) == 1
+            assert offer_ids[0] == offer.id
             assert len(tasks) == 1
             assert tasks[0].name == 'foo 1'
             assert tasks[0].slave_id.value == offer.slave_id.value
@@ -513,11 +535,11 @@ class ChangesSchedulerTest(TestCase):
                               blacklist=_noop_blacklist())
         driver = mock.Mock()
 
-        offer1 = self._make_offer(cluster="foo_cluster", cpus=4)
-        offer2 = self._make_offer(cluster="foo_cluster", cpus=8)
+        offer1 = self._make_offer(hostname="host1", cluster="foo_cluster", cpus=4)
+        offer2 = self._make_offer(hostname="host2", cluster="foo_cluster", cpus=8)
 
-        def check_tasks(offer_id, tasks, filters):
-            assert offer_id == offer2.id
+        def check_tasks(offer_ids, tasks, filters):
+            assert offer_ids == [offer2.id]
             assert len(tasks) == 1
             assert tasks[0].name == 'foo 1'
             assert tasks[0].slave_id.value == offer2.slave_id.value
@@ -531,16 +553,19 @@ class ChangesSchedulerTest(TestCase):
         assert driver.launchTasks.call_count == 1
         assert cs.tasksLaunched == 1
 
-        # Decline any unused offers (should be none)
+        # Decline any unused offers (should be one)
         cs.decline_open_offers(driver)
-        assert driver.declineOffer.call_count == 0
+        assert driver.declineOffer.call_count == 1
 
     def test_least_loaded(self):
         api = mock.Mock(spec=ChangesAPI)
-        # task 4 won't be allocated if we schedule tasks in the order they're returned
-        api.get_allocate_jobsteps.return_value = [self._make_changes_task('1'), self._make_changes_task('2'),
-                                                  self._make_changes_task('3'), self._make_changes_task('4', cpus=3)]
-        api.post_allocate_jobsteps.return_value = ['2', '1', '3']
+        # task 4 won't be allocated if we schedule tasks in the order they're
+        # returned
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('1'), self._make_changes_task('2'),
+            self._make_changes_task('3'), self._make_changes_task('4', cpus=3),
+        ]
+        api.post_allocate_jobsteps.return_value = ['1', '2', '3']
         cs = ChangesScheduler(state_file=None, api=api,
                               blacklist=_noop_blacklist())
         driver = mock.Mock()
@@ -549,7 +574,9 @@ class ChangesSchedulerTest(TestCase):
         # should get loaded first
         offer2 = self._make_offer(id='offer2', cpus=4, mem=8193)
 
-        def check_tasks(offer_id, tasks, filters):
+        def check_tasks(offer_ids, tasks, filters):
+            assert len(offer_ids) == 1
+            offer_id = offer_ids[0]
             assert offer_id in (offer1.id, offer2.id)
             if offer_id == offer1.id:
                 assert len(tasks) == 1
@@ -571,7 +598,7 @@ class ChangesSchedulerTest(TestCase):
         help_resource_offers_and_poll_changes(cs, driver, [offer1, offer2])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200, cluster=None)
-        api.post_allocate_jobsteps.assert_called_once_with(['2', '1', '3'], cluster=None)
+        api.post_allocate_jobsteps.assert_called_once_with(['1', '2', '3'], cluster=None)
         assert driver.launchTasks.call_count == 2
         assert cs.tasksLaunched == 3
 
@@ -595,8 +622,9 @@ class ChangesSchedulerTest(TestCase):
         offer1 = self._make_offer(id="offer1", cluster="1")
         offer2 = self._make_offer(id="offer2", cluster="2")
 
-        def check_tasks(offer_id, tasks, filters):
-            assert offer_id == offer1.id
+        def check_tasks(offer_ids, tasks, filters):
+            assert len(offer_ids) == 1
+            assert offer_ids[0] == offer1.id
             # other task should still get launched if second one failed.
             assert len(tasks) == 1
             assert tasks[0].name == 'foo 1'
@@ -635,15 +663,17 @@ class ChangesSchedulerTest(TestCase):
                               blacklist=_noop_blacklist())
         driver = mock.Mock()
 
-        def launchTasks(offer, tasks, filters=None):
+        launched_offer_id = None
+        def launchTasks(offers, tasks, filters=None):
             # Assert all launched tasks go to offer1 (host1)
-            # Due to stable sorting of offers based on remaining resources,
-            # host1 is assured to be picked first.
-            assert offer == mesos_pb2.OfferID(value="offer1")
+            # host1 is assured to be picked first because it has slightly more
+            # resources at first.
+            assert len(offers) == 1
+            assert offers == [mesos_pb2.OfferID(value="offer1")]
 
         driver.launchTasks.side_effect = launchTasks
 
-        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=5)
         offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
 
         help_resource_offers_and_poll_changes(cs, driver, [offer1, offer2])
@@ -718,10 +748,10 @@ class ChangesSchedulerTest(TestCase):
         ]
         api.post_allocate_jobsteps.return_value = ['2']
 
-        def launchTasks(offer, tasks, filters=None):
+        def launchTasks(offers, tasks, filters=None):
             # Assert launched task goes to offer1 (host1)
             # although it has lesser resources than host2
-            assert offer == mesos_pb2.OfferID(value="offer1")
+            assert offers == [mesos_pb2.OfferID(value="offer1")]
 
         driver.launchTasks.side_effect = launchTasks
 
@@ -774,9 +804,10 @@ class ChangesSchedulerTest(TestCase):
         # hang when it fails.
         expected_launched_tasks = [mesos_pb2.OfferID(value="offer2").value]
         launched_tasks = []
-        def launchTasks(offer, tasks, filters=None):
+        def launchTasks(offers, tasks, filters=None):
             # Assert offer is accepted although slave doesn't have snapshot.
-            launched_tasks.append(offer.value)
+            assert len(offers) == 1
+            launched_tasks.append(offers[0].value)
 
         driver.launchTasks.side_effect = launchTasks
 
@@ -827,9 +858,9 @@ class ChangesSchedulerTest(TestCase):
         ]
         api.post_allocate_jobsteps.return_value = ['2']
 
-        def launchTasks(offer, tasks, filters=None):
+        def launchTasks(offers, tasks, filters=None):
             # Ignore stale snapshot association and select least-loaded slave.
-            assert offer == mesos_pb2.OfferID(value="offer2")
+            assert offers == [mesos_pb2.OfferID(value="offer2")]
 
         driver.launchTasks.side_effect = launchTasks
 
@@ -910,6 +941,51 @@ class ChangesSchedulerTest(TestCase):
         assert api.get_allocate_jobsteps.call_count == 0
         assert api.post_allocate_jobsteps.call_count == 0
 
+        cs.decline_open_offers(driver)
+        driver.declineOffer.assert_not_called()
+
+    def test_combine_offer_fragments(self):
+        api = mock.Mock(spec=ChangesAPI)
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        api.get_allocate_jobsteps.return_value = [
+            self._make_changes_task('1', cpus=2, mem=2048),
+        ]
+        api.post_allocate_jobsteps.return_value = ['1']
+
+        # Add an offer for a different host, to make sure offers for different
+        # hosts aren't being merged/defragmented.
+        host2_offer = self._make_offer(id='host2_offer', hostname='host2',
+                                       cpus=1, mem=1024)
+        cs.resourceOffers(driver, [host2_offer])
+
+        # Add a set of small, fragmented offers one at a time. The task can
+        # only be scheduled once all offers have arrived. By our powers
+        # combined!
+        offers = ((1, 0), (1, 0), (0, 1024), (0, 1024))
+        expected_offer_ids = []
+        for i, (cpu, mem) in enumerate(offers):
+            offer_id = 'host1_offer{}'.format(i)
+            new_offer = self._make_offer(id=offer_id, hostname='host1',
+                                         cpus=cpu, mem=mem)
+            expected_offer_ids.append(new_offer.id)
+
+            if i < len(offers) - 1:  # Not the last iteration
+                help_resource_offers_and_poll_changes(cs, driver, [new_offer])
+                assert api.get_allocate_jobsteps.call_count == 1
+                assert api.post_allocate_jobsteps.call_count == 0
+            else:  # on the final iteration only
+                def check_tasks(offer_ids, tasks, filters):
+                    assert offer_ids == expected_offer_ids
+                    assert len(tasks) == 1
+                driver.launchTasks.side_effect = check_tasks
+                help_resource_offers_and_poll_changes(cs, driver, [new_offer])
+                assert api.get_allocate_jobsteps.call_count == 1
+                assert api.post_allocate_jobsteps.call_count == 1
+            api.reset_mock()
+            driver.reset_mock()
         cs.decline_open_offers(driver)
         driver.declineOffer.assert_not_called()
 
