@@ -11,12 +11,8 @@ import threading
 
 from time import sleep
 
-try:
-    from mesos.native import MesosSchedulerDriver
-    from mesos.interface import mesos_pb2
-except ImportError:
-    from mesos import MesosSchedulerDriver
-    import mesos_pb2
+from mesos.native import MesosSchedulerDriver
+from mesos.interface import mesos_pb2
 
 from .changes_scheduler import ChangesScheduler, ChangesAPI, FileBlacklist
 from .statsreporter import StatsReporter

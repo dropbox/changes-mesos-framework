@@ -20,12 +20,8 @@ from uuid import uuid4
 
 from google.protobuf import text_format as _text_format # type: ignore
 
-try:
-    from mesos.interface import Scheduler, SchedulerDriver
-    from mesos.interface import mesos_pb2
-except ImportError:
-    from mesos import Scheduler, SchedulerDriver
-    import mesos_pb2
+from mesos.interface import Scheduler, SchedulerDriver
+from mesos.interface import mesos_pb2
 
 
 class FileBlacklist(object):

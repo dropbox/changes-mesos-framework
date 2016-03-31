@@ -15,12 +15,8 @@ from unittest import TestCase
 logger = logging.getLogger()
 logger.level = logging.DEBUG
 
-try:
-    from mesos.interface import mesos_pb2
-    from mesos.interface import Scheduler
-except ImportError:
-    import mesos_pb2
-    from mesos import Scheduler
+from mesos.interface import mesos_pb2
+from mesos.interface import Scheduler
 
 from changes_mesos_scheduler.changes_scheduler import ChangesScheduler, APIError, FileBlacklist, ChangesAPI
 from changes_mesos_scheduler import statsreporter
