@@ -1,6 +1,7 @@
 from __future__ import absolute_import, print_function
 
 import bisect
+import concurrent.futures
 import json
 import logging
 import os
@@ -130,7 +131,7 @@ class ChangesAPI(object):
         Args:
             jobstep_ids: list of JobStep ID hexs to allocate.
             cluster: cluster to allocate in.
-        
+
         Returns:
             list: list of jobstep ID hexs that were actually allocated.
         """
@@ -168,11 +169,13 @@ class ChangesAPI(object):
 
 
 class ChangesScheduler(Scheduler):
-    def __init__(self, state_file, api, blacklist, stats=None, changes_request_limit=200):
+    def __init__(self, state_file, api, blacklist, stats=None,
+                 changes_request_limit=200):
         # type: (str, ChangesAPI, FileBlacklist, Optional[Any], int) -> None
         """
         Args:
-            state_file (str): Path where serialized internal state will be stored.
+            state_file (str): Path where serialized internal state will be
+                stored.
             api (ChangesAPI): API to use for interacting with Changes.
             blacklist (FileBlacklist): Blacklist to use.
             stats (statsreporter.Stats): Optional Stats instance to use.
@@ -213,58 +216,59 @@ class ChangesScheduler(Scheduler):
                 # as it will likely be stale.
                 os.remove(self.state_file)
 
-    def poll_changes_until_shutdown(self, driver, interval, loop_done_callback=None):
-        # type: (SchedulerDriver, int, Callable[[], None]) -> None
-        """Start a loop to poll Changes for jobsteps that need to be scheduled.
-        This method will not block, returning immediately after kicking off the
-        polling thread.
-        The poll loop operates by wait()ing for [interval] on the shuttingDown
-        event. If the signal arrives, the thread exits immediately. If the
-        wait() threshold occurs instead, the thread polls Changes and schedules
-        tasks, then returns to wait()ing.
+    def poll_changes_until_shutdown(self, driver, interval):
+        # type: (SchedulerDriver, int) -> None
+        """In a separate thread, periodically poll Changes for jobsteps that
+        need to be scheduled. This method will block, waiting indefinitely
+        until shuttingDown() is set. Then the thread will terminate (finishing
+        any current polling activity if necessary) and this method will return.
         Args:
             driver: the MesosSchedulerDriver object
             interval: number of seconds in each poll loop.
-            loop_done_callback: A Noneable callback function which is invoked
-                whenever a poll cycle has completed. In practice, this is used
-                by testing to synchronize threads.
         """
-        def polling_loop():
-            # type: () -> None
-            """Poll Changes for new jobsteps one time.
-            """
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._polling_loop, driver, interval)
+            logging.info("Started thread at %s. Now waiting...", time.ctime())
+            try:
+                future.result()
+            except Exception:
+                logging.exception("Polling thread failed. Exiting.")
+            self.decline_open_offers(driver)
+
+    def _polling_loop(self, driver, interval):
+        # type: (SchedulerDriver, int) -> None
+        """Poll Changes for new jobsteps forever, until shuttingDown is set.
+        Args:
+            driver: the MesosSchedulerDriver object
+            interval: number of seconds in each poll loop.
+        """
+        try:
             next_wait_duration = 0.0
             while not self.shuttingDown.wait(next_wait_duration):
                 start_time = time.time()
-                try:
-                    # Loop as long as Changes continues providing tasks to
-                    # schedule.
-                    while self._do_one_poll_cycle(driver):
-                        pass
-                finally:
-                    # If one is provided, invoke a callback when all available
-                    # jobsteps have been received from Changes. In practice,
-                    # this is used to synchronize thread events for testing
-                    # purposes.
-                    # Ensure this code runs even if an error occurs (i.e. in
-                    # "finally"), otherwise tests can hang annoyingly.
-                    if loop_done_callback:
-                        loop_done_callback()
+                # Loop as long as Changes continues providing tasks to schedule.
+                while self.poll_and_launch_once(driver):
+                    pass
 
                 # Schedule the delay for the next iteration of the loop,
                 # attempting to compensate for scheduling skew caused by
                 # polling/computation time.
                 last_poll_duration = time.time() - start_time
                 next_wait_duration = max(0, interval - last_poll_duration)
-        self._polling_thread = threading.Thread(target=polling_loop)
-        self._polling_thread.start()
+        finally:
+            # In the event of an exception in the polling thread, shut
+            # everything down clean(ish)ly.
+            self.shuttingDown.set()
 
-    def _do_one_poll_cycle(self, driver):
+    def poll_and_launch_once(self, driver):
         # type: (SchedulerDriver) -> bool
         """Poll Changes once for all jobsteps matching all clusters for which
         we have offers. Then assign these jobsteps to offers. Then execute the
         assignments by launching tasks on Mesos and informing Changes about
         the assignments.
+        This is also the entry point for most testing, since it skips the
+        annoying threading and while-loop behavior that make synchronization
+        difficult.
         Args:
             driver: the MesosSchedulerDriver object
         Returns:
@@ -319,17 +323,10 @@ class ChangesScheduler(Scheduler):
         # requested.
         return len(jobsteps_by_cluster) == self.changes_request_limit
 
-    def wait_for_shutdown(self, driver):
+    def decline_open_offers(self, driver):
         # type: (SchedulerDriver) -> None
-        """Wait for the shutdown signal to be set, then decline all cached
-        Mesos pb_offers.
+        """Decline all cached Mesos pb_offers.
         """
-        # Wait for shuttingDown() to be set and for the polling thread to
-        # terminate, then clean up scheduler state..
-        self.shuttingDown.wait()
-        self._polling_thread.join()
-
-        # Decline any outstanding offers from the Mesos master.
         with self._cached_pb_offers_lock:
             pb_offers = self._cached_pb_offers.values()
             self._stat_and_log_list(pb_offers, 'decline_for_shutdown',

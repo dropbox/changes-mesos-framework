@@ -81,6 +81,10 @@ def run(api_url, mesos_master, user, config_dir, state_file, changes_request_lim
         driver.stop()
 
     def handle_sigterm(signal, frame):
+        # TODO: Avoid save_state race conditions by having handle_sigterm()
+        # only set shuttingDown, then do the actual save-state and driver.stop()
+        # in the main thread after all other threads are join()ed.
+        # Also, stopped doesn't appear to be used.
         stopped.set()
         logging.info("Received sigterm, shutting down")
         scheduler.shuttingDown.set()
@@ -107,8 +111,7 @@ def run(api_url, mesos_master, user, config_dir, state_file, changes_request_lim
     driver.start()
     logging.info("Driver started")
 
-    scheduler.poll_changes_until_shutdown(driver, 5, None)
-    scheduler.wait_for_shutdown(driver)
+    scheduler.poll_changes_until_shutdown(driver, 5)
     status = 0 if driver.join() == mesos_pb2.DRIVER_STOPPED else 1
 
     # Ensure that the driver process terminates.

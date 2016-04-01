@@ -28,7 +28,7 @@ def _noop_blacklist():
     return m
 
 
-def _sync_resource_offers(cs, driver, new_offers):
+def help_resource_offers_and_poll_changes(cs, driver, new_offers):
     # type: (ChangesScheduler, Scheduler, List[Any]) -> None
     """Receive offers from the Mesos master and poll Changes for new jobsteps
     in a synchronous manner to facilitate simpler, more straightforward
@@ -38,32 +38,9 @@ def _sync_resource_offers(cs, driver, new_offers):
         new_offers: A list of Mesos Offer protobufs that should be offered to
             the scheduler.
     """
-    cs.shuttingDown.clear()
-    poll_notifier = threading.Condition()
-    def poll_loop_done_cb():
-        poll_notifier.acquire()
-        poll_notifier.notifyAll()
-        poll_notifier.wait()
-
-    cs.resourceOffers(driver, new_offers)
-    poll_notifier.acquire()
-
-    # In practice, this should poll-loop just one time for tests.
-    cs.poll_changes_until_shutdown(driver, 5, poll_loop_done_cb)
-
-    # Wait for the poll loop to execute one time, then shut down.
-    # We don't call wait_for_shutdown() here in order to distinguish between
-    # ignored and declined offers. The _sync_resource_offers() caller should
-    # call wait_for_shutdown() manually when ignored and declined checks
-    # are complete.
-    poll_notifier.wait()
-    cs.shuttingDown.set()
-
-    # Release the wait() in the polling loop. Since shuttingDown is now set,
-    # the thread should finish immediately (more or less). wait_for_shutdown()
-    # calls join() to cleanly finalize thread termination.
-    poll_notifier.notifyAll()
-    poll_notifier.release()
+    cs.shuttingDown.clear()                     # reset shuttingDown if necessary.
+    cs.resourceOffers(driver, new_offers)       # Get offers from Mesos master.
+    assert not cs.poll_and_launch_once(driver)  # Get jobsteps and launch them.
 
 
 class ChangesAPITest(TestCase):
@@ -176,7 +153,7 @@ class ChangesSchedulerTest(TestCase):
         # later because some filesystems (HFS+, for example) don't have enough precision
         # for this to pass reliably.
         with mock.patch('os.path.getmtime', return_value=time.time()+1) as getmtime:
-            _sync_resource_offers(cs, driver, [offer])
+            help_resource_offers_and_poll_changes(cs, driver, [offer])
             getmtime.assert_called_with(blpath)
         assert api.declineOffer.call_count == 0
         assert api.allocate_jobsteps.call_count == 0
@@ -186,7 +163,7 @@ class ChangesSchedulerTest(TestCase):
         stats.incr.assert_any_call('ignore_for_maintenance', 0)
 
         # Decline any unused offers. Expect the blacklisted offer.
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_called_once_with(offer.id)
 
     def test_blacklist_maintenance(self):
@@ -272,7 +249,7 @@ class ChangesSchedulerTest(TestCase):
         cs = ChangesScheduler(state_file=None, api=api, stats=stats,
                               blacklist=_noop_blacklist())
         driver = mock.Mock()
-        _sync_resource_offers(cs, driver, all_offers)
+        help_resource_offers_and_poll_changes(cs, driver, all_offers)
 
         # Check that the maintenanced offers are declined.
         assert driver.declineOffer.call_count == 0
@@ -294,7 +271,7 @@ class ChangesSchedulerTest(TestCase):
         assert actual_launch_set == expected_launch_set
 
         # Decline any unused offers. Expect all maintenanced offers.
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         for offer in expected_ignores:
             driver.declineOffer.assert_any_call(offer.id)
         assert driver.declineOffer.call_count == len(expected_ignores)
@@ -324,13 +301,13 @@ class ChangesSchedulerTest(TestCase):
 
         offer = self._make_offer()
 
-        _sync_resource_offers(cs, driver, [offer])
+        help_resource_offers_and_poll_changes(cs, driver, [offer])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200, cluster=None)
         assert driver.declineOffer.call_count == 0
 
         # Decline any unused offers. Expect the errored offer.
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_called_once_with(offer.id)
 
     def test_api_no_tasks(self):
@@ -342,13 +319,13 @@ class ChangesSchedulerTest(TestCase):
 
         offer = self._make_offer(cluster="foo_cluster")
 
-        _sync_resource_offers(cs, driver, [offer])
+        help_resource_offers_and_poll_changes(cs, driver, [offer])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200, cluster="foo_cluster")
         assert driver.declineOffer.call_count == 0
 
         # Decline any unused offers. Expect the only existing offer.
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_called_once_with(offer.id)
 
     def test_api_one_task(self):
@@ -376,7 +353,7 @@ class ChangesSchedulerTest(TestCase):
             assert filters.refuse_seconds == 1.0
         driver.launchTasks.side_effect = check_tasks
 
-        _sync_resource_offers(cs, driver, [offer])
+        help_resource_offers_and_poll_changes(cs, driver, [offer])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200, cluster="foo_cluster")
         api.post_allocate_jobsteps.assert_called_once_with(['1'], cluster="foo_cluster")
@@ -384,7 +361,7 @@ class ChangesSchedulerTest(TestCase):
         assert cs.tasksLaunched == 1
 
         # Decline any unused offers (should be none)
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         assert driver.declineOffer.call_count == 0
 
     def test_not_enough_resources(self):
@@ -397,7 +374,7 @@ class ChangesSchedulerTest(TestCase):
 
         offer = self._make_offer(cluster="foo_cluster", cpus=4)
 
-        _sync_resource_offers(cs, driver, [offer])
+        help_resource_offers_and_poll_changes(cs, driver, [offer])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200, cluster="foo_cluster")
         assert api.post_allocate_jobsteps.call_count == 0
@@ -407,7 +384,7 @@ class ChangesSchedulerTest(TestCase):
 
         # Decline any unused offers. Expect the offer with insufficient
         # resources to schedule the jobstep.
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_called_once_with(offer.id)
 
     def test_tries_all_offers(self):
@@ -429,7 +406,7 @@ class ChangesSchedulerTest(TestCase):
             assert filters.refuse_seconds == 1.0
         driver.launchTasks.side_effect = check_tasks
 
-        _sync_resource_offers(cs, driver, [offer1, offer2])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1, offer2])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200, cluster="foo_cluster")
         api.post_allocate_jobsteps.assert_called_once_with(['1'], cluster="foo_cluster")
@@ -437,7 +414,7 @@ class ChangesSchedulerTest(TestCase):
         assert cs.tasksLaunched == 1
 
         # Decline any unused offers (should be none)
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         assert driver.declineOffer.call_count == 0
 
     def test_least_loaded(self):
@@ -473,7 +450,7 @@ class ChangesSchedulerTest(TestCase):
 
         driver.launchTasks.side_effect = check_tasks
 
-        _sync_resource_offers(cs, driver, [offer1, offer2])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1, offer2])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200, cluster=None)
         api.post_allocate_jobsteps.assert_called_once_with(['2', '1', '3'], cluster=None)
@@ -481,7 +458,7 @@ class ChangesSchedulerTest(TestCase):
         assert cs.tasksLaunched == 3
 
         # Decline any unused offers (should be none)
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         assert driver.declineOffer.call_count == 0
 
     def test_alloc_failed(self):
@@ -509,7 +486,7 @@ class ChangesSchedulerTest(TestCase):
             assert filters.refuse_seconds == 1.0
         driver.launchTasks.side_effect = check_tasks
 
-        _sync_resource_offers(cs, driver, [offer1, offer2])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1, offer2])
 
         api.get_allocate_jobsteps.assert_has_calls([mock.call(limit=200, cluster='1'), mock.call(limit=200, cluster='2')],
                                                    any_order=True)
@@ -523,7 +500,7 @@ class ChangesSchedulerTest(TestCase):
 
         # Decline any unused offers (offer2 should be open, since it failed
         # to schedule.)
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_called_once_with(offer2.id)
 
     def test_group_snapshots_on_same_machine(self):
@@ -551,7 +528,7 @@ class ChangesSchedulerTest(TestCase):
         offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
         offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
 
-        _sync_resource_offers(cs, driver, [offer1, offer2])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1, offer2])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200,
                                                           cluster=None)
@@ -562,7 +539,7 @@ class ChangesSchedulerTest(TestCase):
 
         # Decline any unused offers. Expect offer2 remains, since both tasks
         # were schedule on offer1.
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_called_once_with(offer2.id)
 
     def test_fall_back_to_least_loaded(self):
@@ -582,7 +559,7 @@ class ChangesSchedulerTest(TestCase):
         offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
         offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
 
-        _sync_resource_offers(cs, driver, [offer1, offer2])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1, offer2])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200,
                                                           cluster=None)
@@ -592,7 +569,7 @@ class ChangesSchedulerTest(TestCase):
         assert cs.tasksLaunched == 2
 
         # Decline any unused offers (should be none)
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         assert driver.declineOffer.call_count == 0
 
     def test_prefer_loaded_slave_with_snapshot(self):
@@ -609,12 +586,12 @@ class ChangesSchedulerTest(TestCase):
         driver = mock.Mock()
 
         offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
-        _sync_resource_offers(cs, driver, [offer1])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200,
                                                           cluster=None)
 
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         api.reset_mock()
         driver.reset_mock()
 
@@ -632,7 +609,7 @@ class ChangesSchedulerTest(TestCase):
 
         offer1 = self._make_offer(id='offer1', hostname='host1', cpus=2)
         offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
-        _sync_resource_offers(cs, driver, [offer1, offer2])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1, offer2])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200,
                                                           cluster=None)
@@ -643,7 +620,7 @@ class ChangesSchedulerTest(TestCase):
 
         # Decline any unused offers. Expect offer2 remains since offer1 was
         # prefered.
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_called_once_with(offer2.id)
 
     def test_slave_with_snapshot_unavailable(self):
@@ -660,12 +637,12 @@ class ChangesSchedulerTest(TestCase):
         driver = mock.Mock()
 
         offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
-        _sync_resource_offers(cs, driver, [offer1])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200,
                                                           cluster=None)
 
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         api.reset_mock()
         driver.reset_mock()
 
@@ -686,7 +663,7 @@ class ChangesSchedulerTest(TestCase):
         driver.launchTasks.side_effect = launchTasks
 
         offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
-        _sync_resource_offers(cs, driver, [offer2])
+        help_resource_offers_and_poll_changes(cs, driver, [offer2])
         assert launched_tasks == expected_launched_tasks
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200,
@@ -697,7 +674,7 @@ class ChangesSchedulerTest(TestCase):
         assert cs.tasksLaunched == 2
 
         # Decline any unused offers (should be none)
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         assert driver.declineOffer.call_count == 0
 
     @mock.patch('time.time')
@@ -716,13 +693,13 @@ class ChangesSchedulerTest(TestCase):
         driver = mock.Mock()
 
         offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
-        _sync_resource_offers(cs, driver, [offer1])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200,
                                                           cluster=None)
         assert api.post_allocate_jobsteps.call_count == 1
 
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         api.reset_mock()
         driver.reset_mock()
         time_mock.return_value = 1000000
@@ -740,7 +717,7 @@ class ChangesSchedulerTest(TestCase):
 
         offer1 = self._make_offer(id='offer1', hostname='host1', cpus=2)
         offer2 = self._make_offer(id='offer2', hostname='host2', cpus=4)
-        _sync_resource_offers(cs, driver, [offer1, offer2])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1, offer2])
 
         api.get_allocate_jobsteps.assert_called_once_with(limit=200,
                                                           cluster=None)
@@ -751,7 +728,7 @@ class ChangesSchedulerTest(TestCase):
 
         # Decline any unused offers. Expect offer1 remains, since offer2 was
         # least-loaded.
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_called_once_with(offer1.id)
 
     def test_cached_offer_is_used(self):
@@ -763,11 +740,11 @@ class ChangesSchedulerTest(TestCase):
         # Scheduler has an offer, but no tasks.
         api.get_allocate_jobsteps.return_value = []
         offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
-        _sync_resource_offers(cs, driver, [offer1])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1])
         assert api.get_allocate_jobsteps.call_count == 1
         assert api.post_allocate_jobsteps.call_count == 0
 
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         api.reset_mock()
         driver.reset_mock()
 
@@ -776,11 +753,11 @@ class ChangesSchedulerTest(TestCase):
             self._make_changes_task('2', cpus=2, snapshot='snapfoo')
         ]
         api.post_allocate_jobsteps.return_value = ['2']
-        _sync_resource_offers(cs, driver, [])
+        help_resource_offers_and_poll_changes(cs, driver, [])
         assert api.get_allocate_jobsteps.call_count == 1
         assert api.post_allocate_jobsteps.call_count == 1
 
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_not_called()
 
     def test_offer_rescinded(self):
@@ -792,11 +769,11 @@ class ChangesSchedulerTest(TestCase):
         # Scheduler has an offer, but no tasks are available.
         api.get_allocate_jobsteps.return_value = []
         offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
-        _sync_resource_offers(cs, driver, [offer1])
+        help_resource_offers_and_poll_changes(cs, driver, [offer1])
         assert api.get_allocate_jobsteps.call_count == 1
         assert api.post_allocate_jobsteps.call_count == 0
 
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         api.reset_mock()
         driver.reset_mock()
 
@@ -805,15 +782,76 @@ class ChangesSchedulerTest(TestCase):
         api.get_allocate_jobsteps.assert_not_called()
         api.reset_mock()
         driver.reset_mock()
-        
+
         # Now changes has no offers, so the task can't be scheduled.
         api.get_allocate_jobsteps.return_value = [
             self._make_changes_task('2', cpus=2, snapshot='snapfoo')
         ]
-        _sync_resource_offers(cs, driver, [])
+        help_resource_offers_and_poll_changes(cs, driver, [])
         # No offers -> no clusters to query for -> no get_allocate_jobsteps calls.
-        assert api.get_allocate_jobsteps.call_count == 0  
+        assert api.get_allocate_jobsteps.call_count == 0
         assert api.post_allocate_jobsteps.call_count == 0
 
-        cs.wait_for_shutdown(driver)
+        cs.decline_open_offers(driver)
         driver.declineOffer.assert_not_called()
+
+    def test_full_thread_polling(self):
+        """This test simply runs through the startup/teardown machinery for the
+        Changes polling thread. We run the polling a couple of times to ensure
+        the looping works properly.
+        """
+        api = mock.Mock(spec=ChangesAPI)
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        # Add an offer to ensure get_allocate_jobsteps() is polled.
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        cs.resourceOffers(driver, [offer1])
+
+        # After get_allocate_jobsteps() is called a couple of times, shut down.
+        count = [0]
+        def get_allocate_jobsteps(limit, cluster):
+            if count[0] > 3:
+                cs.shuttingDown.set()
+            count[0] += 1
+            return []
+        api.get_allocate_jobsteps.side_effect = get_allocate_jobsteps
+
+        # Just makes sure this executes with no exceptions.
+        cs.poll_changes_until_shutdown(driver, 0)
+
+    def test_full_thread_polling_with_exception(self):
+        """Test that exceptions in the polling thread are reported back to the
+        main thread correctly.
+        """
+        api = mock.Mock(spec=ChangesAPI)
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        # Add an offer to ensure get_allocate_jobsteps() is polled.
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=4)
+        cs.resourceOffers(driver, [offer1])
+
+        # Force an exception in get_allocate_jobsteps()
+        def get_allocate_jobsteps(limit, cluster):
+            assert False
+        api.get_allocate_jobsteps.side_effect = get_allocate_jobsteps
+
+        class Filter(logging.Filter):
+            def __init__(self):
+                super(Filter, self).__init__()
+                self.found_error = False
+
+            def filter(self, record):
+                if record.getMessage() == "Polling thread failed. Exiting.":
+                    self.found_error = True
+
+        f = Filter()
+        try:
+            logger.addFilter(f)
+            cs.poll_changes_until_shutdown(driver, 0)
+            assert f.found_error
+        finally:
+            logger.removeFilter(f)

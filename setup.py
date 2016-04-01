@@ -13,6 +13,6 @@ setup(name='changes-mesos-scheduler',
       extras_require={'tests': tests_require},
       dependency_links = ['http://downloads.mesosphere.io/master/ubuntu/%s/mesos-%s-py2.7-linux-x86_64.egg#egg=mesos'
                           % (UBUNTU_VERSION, MESOS_VERSION)],
-      install_requires=['statsd', 'protobuf>=2.5.0,<3a0', 'raven', 'mesos', 'typing'],
+      install_requires=['futures==2.2', 'mesos', 'protobuf>=2.5.0,<3a0', 'raven', 'statsd', 'typing'],
       package_dir={'changes_mesos_scheduler': 'changes_mesos_scheduler'})
 
