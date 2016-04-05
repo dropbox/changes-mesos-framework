@@ -469,7 +469,8 @@ class ChangesScheduler(Scheduler):
         task.task_id.value = str(tid)
         task.slave_id.value = offer.slave_id.value
 
-        hostname = task.labels.labels.add(key="hostname", value=offer.hostname)
+        task.labels.labels.add(key="hostname", value=offer.hostname)
+        task.labels.labels.add(key="jobstep_id", value=jobstep['id'])
 
         cmd = jobstep["cmd"]
 
@@ -800,20 +801,23 @@ class ChangesScheduler(Scheduler):
             self.tasksFinished += 1
             self.taskJobStepMapping.pop(status.task_id.value, None)
 
-        if not jobstep_id:
-            # TODO(dcramer): how does this happen?
-            logging.error("Task %s is missing JobStep ID (state %s, message %s)", status.task_id.value, state,
-                          _text_format.MessageToString(status))
-            return
-
-        hostname = None
+        labels = {}
         for label in status.labels.labels:
-            if label.key == 'hostname':
-                # we only use the first part of the hostname
-                hostname = label.value
-                break
+            labels[label.key] = label.value
+        hostname = labels.get('hostname')
         if not hostname:
             logging.warning('No hostname associated with task: %s', status.task_id.value)
+
+        jobstep_id_label = labels.get('jobstep_id')
+        if jobstep_id != jobstep_id_label or jobstep_id is None:
+            # TODO(nate): how does this happen?
+            logging.error("Task %s mismatch between taskJobStepMapping JobStep ID (%s) and Mesos label JobStep ID (%s) (state %s, message %s)",
+                          status.task_id.value, jobstep_id, jobstep_id_label, state, 
+                          _text_format.MessageToString(status))
+            self._stats.incr('jobstep_id_mismatch_' + state)
+            jobstep_id = jobstep_id or jobstep_id_label
+            if not jobstep_id:
+                return
 
         if state == 'finished':
             try:
