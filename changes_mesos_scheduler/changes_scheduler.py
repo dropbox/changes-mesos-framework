@@ -643,9 +643,6 @@ class ChangesScheduler(Scheduler):
             task.task_id.value = str(tid)
             task.slave_id.value = self.slave_id
 
-            task.labels.labels.add(key="hostname", value=self.hostname)
-            task.labels.labels.add(key="jobstep_id", value=jobstep['id'])
-
             cmd = jobstep["cmd"]
 
             task.command.value = cmd
@@ -963,27 +960,17 @@ class ChangesScheduler(Scheduler):
             self.tasksFinished += 1
             self.taskJobStepMapping.pop(status.task_id.value, None)
 
-        labels = {}
-        for label in status.labels.labels:
-            labels[label.key] = label.value
-        hostname = labels.get('hostname')
-        if not hostname:
-            logging.warning('No hostname associated with task: %s', status.task_id.value)
-
-        jobstep_id_label = labels.get('jobstep_id')
-        if jobstep_id != jobstep_id_label or jobstep_id is None:
+        if jobstep_id is None:
             # TODO(nate): how does this happen?
-            logging.error("Task %s mismatch between taskJobStepMapping JobStep ID (%s) and Mesos label JobStep ID (%s) (state %s, message %s)",
-                          status.task_id.value, jobstep_id, jobstep_id_label, state, 
+            logging.error("Task %s missing JobStep ID (state %s, message %s)",
+                          status.task_id.value, state, 
                           _text_format.MessageToString(status))
-            self._stats.incr('jobstep_id_mismatch_' + state)
-            jobstep_id = jobstep_id or jobstep_id_label
-            if not jobstep_id:
-                return
+            self._stats.incr('missing_jobstep_id_' + state)
+            return
 
         if state == 'finished':
             try:
-                self._changes_api.update_jobstep(jobstep_id, status="finished", hostname=hostname)
+                self._changes_api.update_jobstep(jobstep_id, status="finished")
             except APIError:
                 pass
         elif state in ('killed', 'lost', 'failed'):
@@ -1000,7 +987,7 @@ class ChangesScheduler(Scheduler):
             except APIError:
                 pass
             try:
-                self._changes_api.update_jobstep(jobstep_id, status="finished", result="infra_failed", hostname=hostname)
+                self._changes_api.update_jobstep(jobstep_id, status="finished", result="infra_failed")
             except APIError:
                 pass
 

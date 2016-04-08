@@ -72,16 +72,12 @@ class ChangesSchedulerTest(TestCase):
         super(ChangesSchedulerTest, self).tearDown()
 
     def _make_task_status(self, id='taskid', state=mesos_pb2.TASK_FINISHED,
-                          message="foo", hostname='hostname', jobstep_id='1'):
+                          message="foo", jobstep_id='1'):
         status = mesos_pb2.TaskStatus(
             task_id=mesos_pb2.TaskID(value=id),
             state=state,
             message=message,
         )
-        labels = {'hostname': hostname, 'jobstep_id': jobstep_id}
-        for k, v in labels.iteritems():
-            if v is not None:
-                status.labels.labels.add(key=k, value=v)
         return status
 
     def _make_offer(self,
@@ -164,7 +160,7 @@ class ChangesSchedulerTest(TestCase):
         assert cs.tasksFinished == 1
         assert len(cs.taskJobStepMapping) == 0
 
-        api.update_jobstep.assert_called_once_with('1', status='finished', hostname='hostname')
+        api.update_jobstep.assert_called_once_with('1', status='finished')
 
     def test_task_failed(self):
         api = mock.Mock(spec=ChangesAPI)
@@ -181,7 +177,7 @@ class ChangesSchedulerTest(TestCase):
         assert len(cs.taskJobStepMapping) == 1
 
         assert api.jobstep_console_append.call_count == 1
-        api.update_jobstep.assert_called_once_with('1', status='finished', result='infra_failed', hostname='hostname')
+        api.update_jobstep.assert_called_once_with('1', status='finished', result='infra_failed')
 
     def test_missing_jobstep_mapping(self):
         api = mock.Mock(spec=ChangesAPI)
@@ -197,60 +193,7 @@ class ChangesSchedulerTest(TestCase):
 
         assert cs.tasksFinished == 1
 
-        stats.incr.assert_called_once_with('jobstep_id_mismatch_finished')
-        api.update_jobstep.assert_called_once_with('1', status='finished', hostname='hostname')
-
-    def test_missing_status_jobstep_id(self):
-        api = mock.Mock(spec=ChangesAPI)
-        stats = mock.Mock()
-        cs = ChangesScheduler(state_file=None, api=api, stats=stats,
-                              blacklist=_noop_blacklist())
-        cs.taskJobStepMapping = {'taskid': '1'}
-        driver = mock.Mock()
-
-        status = self._make_task_status(id='taskid', jobstep_id=None, state=mesos_pb2.TASK_FINISHED)
-
-        cs.statusUpdate(driver, status)
-
-        assert cs.tasksFinished == 1
-
-        stats.incr.assert_called_once_with('jobstep_id_mismatch_finished')
-        api.update_jobstep.assert_called_once_with('1', status='finished', hostname='hostname')
-
-    def test_mismatched_jobstep_ids(self):
-        api = mock.Mock(spec=ChangesAPI)
-        stats = mock.Mock()
-        cs = ChangesScheduler(state_file=None, api=api, stats=stats,
-                              blacklist=_noop_blacklist())
-        cs.taskJobStepMapping = {'taskid': '2'}
-        driver = mock.Mock()
-
-        status = self._make_task_status(id='taskid', jobstep_id='1', state=mesos_pb2.TASK_FINISHED)
-
-        cs.statusUpdate(driver, status)
-
-        assert cs.tasksFinished == 1
-
-        stats.incr.assert_called_once_with('jobstep_id_mismatch_finished')
-        # we currently prefer taskJobStepMapping
-        api.update_jobstep.assert_called_once_with('2', status='finished', hostname='hostname')
-
-    def test_missing_both_jobstep_ids(self):
-        api = mock.Mock(spec=ChangesAPI)
-        stats = mock.Mock()
-        cs = ChangesScheduler(state_file=None, api=api, stats=stats,
-                              blacklist=_noop_blacklist())
-        cs.taskJobStepMapping = {}
-        driver = mock.Mock()
-
-        status = self._make_task_status(id='taskid', jobstep_id=None, state=mesos_pb2.TASK_FINISHED)
-
-        cs.statusUpdate(driver, status)
-
-        assert cs.tasksFinished == 1
-
-        stats.incr.assert_called_once_with('jobstep_id_mismatch_finished')
-        api.update_jobstep.assert_not_called()
+        stats.incr.assert_called_once_with('missing_jobstep_id_finished')
 
     def test_blacklist(self):
         blpath = self.test_dir + '/blacklist'
@@ -480,11 +423,6 @@ class ChangesSchedulerTest(TestCase):
             assert len(tasks) == 1
             assert tasks[0].name == 'foo 1'
             assert tasks[0].slave_id.value == offer.slave_id.value
-            labels = {}
-            for label in tasks[0].labels.labels:
-                labels[label.key] = label.value
-            assert labels['hostname'] == 'aHostname'
-            assert labels['jobstep_id'] == '1'
             assert tasks[0].command.value == 'ls'
             assert tasks[0].resources[0].name == "cpus"
             assert tasks[0].resources[0].scalar.value == 2
