@@ -11,7 +11,7 @@ import urllib2 # type: ignore
 
 from changes_mesos_scheduler import statsreporter
 
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, NamedTuple, Optional, Set, Tuple
 
 from collections import defaultdict
 from threading import Event
@@ -167,6 +167,11 @@ class ChangesAPI(object):
         self._api_request(url, {'source': 'console', 'text': text})
 
 
+class SlaveInfo(object):
+    def __init__(self, hostname):
+        # type: (str) -> None
+        self.hostname = hostname
+
 class ChangesScheduler(Scheduler):
     def __init__(self, state_file, api, blacklist, stats=None,
                  changes_request_limit=200):
@@ -182,6 +187,8 @@ class ChangesScheduler(Scheduler):
         self.framework_id = None # type: Optional[str]
         self._changes_api = api
         self.taskJobStepMapping = {} # type: Dict[str, str]
+        # maps from a slave_id to general info about that slave (currently only its hostname)
+        self.slaveIdInfo = {} # type: Dict[str, SlaveInfo]
         self.tasksLaunched = 0
         self.tasksFinished = 0
         self.shuttingDown = Event()
@@ -893,6 +900,7 @@ class ChangesScheduler(Scheduler):
                                                    offer.cluster)
                     self._cached_slaves[pb_offer.slave_id.value] = slave
                 self._cached_slaves[pb_offer.slave_id.value].add_offer(offer)
+                self.slaveIdInfo[pb_offer.slave_id.value] = SlaveInfo(hostname=pb_offer.hostname)
 
     def _slaves_by_cluster(self, slaves):
         slaves_by_cluster = defaultdict(list)
@@ -961,6 +969,12 @@ class ChangesScheduler(Scheduler):
             self.tasksFinished += 1
             self.taskJobStepMapping.pop(status.task_id.value, None)
 
+        hostname = None
+        if self.slaveIdInfo.get(status.slave_id.value):
+            hostname = self.slaveIdInfo[status.slave_id.value].hostname
+        if hostname is None:
+            logging.warning('No hostname associated with task: %s (slave_id %s)', status.task_id.value, status.slave_id.value)
+
         if jobstep_id is None:
             # TODO(nate): how does this happen?
             logging.error("Task %s missing JobStep ID (state %s, message %s)",
@@ -971,7 +985,7 @@ class ChangesScheduler(Scheduler):
 
         if state == 'finished':
             try:
-                self._changes_api.update_jobstep(jobstep_id, status="finished")
+                self._changes_api.update_jobstep(jobstep_id, status="finished", hostname=hostname)
             except APIError:
                 pass
         elif state in ('killed', 'lost', 'failed'):
@@ -988,7 +1002,7 @@ class ChangesScheduler(Scheduler):
             except APIError:
                 pass
             try:
-                self._changes_api.update_jobstep(jobstep_id, status="finished", result="infra_failed")
+                self._changes_api.update_jobstep(jobstep_id, status="finished", result="infra_failed", hostname=hostname)
             except APIError:
                 pass
 
@@ -1039,11 +1053,15 @@ class ChangesScheduler(Scheduler):
         state = {}
         state['framework_id'] = self.framework_id
         state['taskJobStepMapping'] = self.taskJobStepMapping
+        state['slaveIdInfo'] = {}
+        for slave, info in self.slaveIdInfo.iteritems():
+            state['slaveIdInfo'][slave] = {'hostname': info.hostname}
         state['tasksLaunched'] = self.tasksLaunched
         state['tasksFinished'] = self.tasksFinished
         state['snapshot_slave_map'] = self._snapshot_slave_map
         logging.info('Attempting to save state for framework %s with %d running tasks to %s',
                      self.framework_id, len(self.taskJobStepMapping), self.state_file)
+
         with open(self.state_file, 'w') as f:
             f.write(json.dumps(state))
 
@@ -1057,6 +1075,9 @@ class ChangesScheduler(Scheduler):
 
         self.framework_id = state['framework_id']
         self.taskJobStepMapping = state['taskJobStepMapping']
+        self.slaveIdInfo = {}
+        for slave, info in state.get('slaveIdInfo', {}).iteritems():
+            self.slaveIdInfo[slave] = SlaveInfo(hostname=info.get('hostname'))
         self.tasksLaunched = state['tasksLaunched']
         self.tasksFinished = state['tasksFinished']
         snapshot_slave_map = state['snapshot_slave_map']

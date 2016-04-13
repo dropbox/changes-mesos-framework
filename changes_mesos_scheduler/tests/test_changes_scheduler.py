@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import shutil
 import tempfile
@@ -18,7 +19,7 @@ logger.level = logging.DEBUG
 from mesos.interface import mesos_pb2
 from mesos.interface import Scheduler
 
-from changes_mesos_scheduler.changes_scheduler import ChangesScheduler, APIError, FileBlacklist, ChangesAPI
+from changes_mesos_scheduler.changes_scheduler import ChangesScheduler, APIError, FileBlacklist, ChangesAPI, SlaveInfo
 from changes_mesos_scheduler import statsreporter
 
 def _noop_blacklist():
@@ -72,9 +73,10 @@ class ChangesSchedulerTest(TestCase):
         super(ChangesSchedulerTest, self).tearDown()
 
     def _make_task_status(self, id='taskid', state=mesos_pb2.TASK_FINISHED,
-                          message="foo", jobstep_id='1'):
+                          message="foo", slave_id='slaveid', jobstep_id='1'):
         status = mesos_pb2.TaskStatus(
             task_id=mesos_pb2.TaskID(value=id),
+            slave_id=mesos_pb2.SlaveID(value=slave_id),
             state=state,
             message=message,
         )
@@ -133,24 +135,52 @@ class ChangesSchedulerTest(TestCase):
         cs.tasksLaunched = 5
         cs.tasksFinished = 3
         cs.taskJobStepMapping['task x'] = 'jobstep x'
+        cs.slaveIdInfo['slaveid'] = SlaveInfo(hostname='aHostname')
         cs._snapshot_slave_map = defaultdict(lambda: defaultdict(float))
         cs._snapshot_slave_map['snapid']['host1'] = 1234567.0
         cs._snapshot_slave_map['snapid']['host2'] = 1234569.0
         cs.save_state()
+        cs = None
 
         cs2 = ChangesScheduler(state_file, api=mock.Mock(),
                                blacklist=_noop_blacklist())
         assert 5 == cs2.tasksLaunched
         assert 3 == cs2.tasksFinished
         assert {'task x': 'jobstep x'} == cs2.taskJobStepMapping
+        assert cs2.slaveIdInfo['slaveid'].hostname == 'aHostname'
         assert not os.path.exists(state_file)
         assert {'snapid': {'host1': 1234567.0, 'host2': 1234569.0}} == cs2._snapshot_slave_map
+
+    def test_save_restore_state_missing(self):
+        state_file = self.test_dir + '/test.json'
+
+        state = {'framework_id': 1,
+                 'tasksLaunched': 5,
+                 'tasksFinished': 3,
+                 'taskJobStepMapping': {'task x': 'jobstep x'},
+                 'snapshot_slave_map': {}
+                 }
+
+        with open(state_file, 'w') as f:
+            f.write(json.dumps(state))
+
+        cs2 = ChangesScheduler(state_file, api=mock.Mock(),
+                               blacklist=_noop_blacklist())
+        assert 5 == cs2.tasksLaunched
+        assert 3 == cs2.tasksFinished
+        assert {'task x': 'jobstep x'} == cs2.taskJobStepMapping
+        # when the scheduler is first updated to have slaveIdInfo, state.json
+        # won't have anything about slaveIdInfo; test that it works anyway
+        assert cs2.slaveIdInfo == {}
+        assert not os.path.exists(state_file)
+        assert {} == cs2._snapshot_slave_map
 
     def test_task_finished(self):
         api = mock.Mock(spec=ChangesAPI)
         cs = ChangesScheduler(state_file=None, api=api,
                               blacklist=_noop_blacklist())
         cs.taskJobStepMapping = {'taskid': '1'}
+        cs.slaveIdInfo = {'slaveid': SlaveInfo(hostname='aHostname')}
         driver = mock.Mock()
 
         status = self._make_task_status(id='taskid', jobstep_id='1')
@@ -160,13 +190,14 @@ class ChangesSchedulerTest(TestCase):
         assert cs.tasksFinished == 1
         assert len(cs.taskJobStepMapping) == 0
 
-        api.update_jobstep.assert_called_once_with('1', status='finished')
+        api.update_jobstep.assert_called_once_with('1', status='finished', hostname='aHostname')
 
     def test_task_failed(self):
         api = mock.Mock(spec=ChangesAPI)
         cs = ChangesScheduler(state_file=None, api=api,
                               blacklist=_noop_blacklist())
         cs.taskJobStepMapping = {'taskid': '1'}
+        cs.slaveIdInfo = {'slaveid': SlaveInfo(hostname='aHostname')}
         driver = mock.Mock()
 
         status = self._make_task_status(id='taskid', jobstep_id='1', state=mesos_pb2.TASK_FAILED)
@@ -177,7 +208,7 @@ class ChangesSchedulerTest(TestCase):
         assert len(cs.taskJobStepMapping) == 1
 
         assert api.jobstep_console_append.call_count == 1
-        api.update_jobstep.assert_called_once_with('1', status='finished', result='infra_failed')
+        api.update_jobstep.assert_called_once_with('1', status='finished', result='infra_failed', hostname='aHostname')
 
     def test_missing_jobstep_mapping(self):
         api = mock.Mock(spec=ChangesAPI)
@@ -194,6 +225,22 @@ class ChangesSchedulerTest(TestCase):
         assert cs.tasksFinished == 1
 
         stats.incr.assert_called_once_with('missing_jobstep_id_finished')
+
+    def test_missing_hostname_mapping(self):
+        api = mock.Mock(spec=ChangesAPI)
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        cs.taskJobStepMapping = {'taskid': '1'}
+        driver = mock.Mock()
+
+        status = self._make_task_status(id='taskid', jobstep_id='1')
+
+        cs.statusUpdate(driver, status)
+
+        assert cs.tasksFinished == 1
+        assert len(cs.taskJobStepMapping) == 0
+
+        api.update_jobstep.assert_called_once_with('1', status='finished', hostname=None)
 
     def test_blacklist(self):
         blpath = self.test_dir + '/blacklist'
