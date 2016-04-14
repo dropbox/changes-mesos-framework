@@ -5,7 +5,6 @@ import concurrent.futures
 import json
 import logging
 import os
-import sys
 import threading
 import time
 import urllib2 # type: ignore
@@ -228,6 +227,8 @@ class ChangesScheduler(Scheduler):
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(self._polling_loop, driver, interval)
             logging.info("Started thread at %s. Now waiting...", time.ctime())
+            while not future.done():
+                time.sleep(3)
             try:
                 future.result()
             except Exception:
@@ -887,7 +888,7 @@ class ChangesScheduler(Scheduler):
             for pb_offer in pb_offers:
                 offer = ChangesScheduler.OfferWrapper(pb_offer)
                 if pb_offer.slave_id.value not in self._cached_slaves:
-                    slave = ChangesScheduler.Slave(pb_offer.slave_id.value, 
+                    slave = ChangesScheduler.Slave(pb_offer.slave_id.value,
                                                    pb_offer.hostname,
                                                    offer.cluster)
                     self._cached_slaves[pb_offer.slave_id.value] = slave
@@ -963,7 +964,7 @@ class ChangesScheduler(Scheduler):
         if jobstep_id is None:
             # TODO(nate): how does this happen?
             logging.error("Task %s missing JobStep ID (state %s, message %s)",
-                          status.task_id.value, state, 
+                          status.task_id.value, state,
                           _text_format.MessageToString(status))
             self._stats.incr('missing_jobstep_id_' + state)
             return
