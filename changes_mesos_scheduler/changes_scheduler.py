@@ -235,7 +235,7 @@ class ChangesScheduler(Scheduler):
             future = executor.submit(self._polling_loop, driver, interval)
             logging.info("Started thread at %s. Now waiting...", time.ctime())
             while not future.done():
-                time.sleep(3)
+                time.sleep(.01)
             try:
                 future.result()
             except Exception:
