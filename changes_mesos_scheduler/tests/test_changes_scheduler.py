@@ -418,6 +418,19 @@ class ChangesSchedulerTest(TestCase):
         stats.incr.assert_any_call('slave_lost')
         assert len(cs._cached_slaves) == 0
 
+    def test_disconnected(self):
+        stats = mock.Mock()
+        cs = ChangesScheduler(state_file=None, api=mock.Mock(), stats=stats,
+                              blacklist=_noop_blacklist())
+        driver = mock.Mock()
+
+        pb_offer = self._make_offer(hostname="hostname")
+        cs.resourceOffers(driver, [pb_offer])
+        assert len(cs._cached_slaves) == 1
+
+        cs.disconnected(driver)
+        assert len(cs._cached_slaves) == 0
+
     def test_api_error(self):
         api = mock.Mock(spec=ChangesAPI)
         api.get_allocate_jobsteps.side_effect = APIError("Failure")
@@ -878,7 +891,8 @@ class ChangesSchedulerTest(TestCase):
         assert api.get_allocate_jobsteps.call_count == 1
         assert api.post_allocate_jobsteps.call_count == 0
 
-        cs.decline_open_offers(driver)
+        # Don't decline offers here like we decline offers when resetting
+        # elsewhere. We need to leave the offer cache intact.
         api.reset_mock()
         driver.reset_mock()
 

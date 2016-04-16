@@ -344,6 +344,7 @@ class ChangesScheduler(Scheduler):
                 self._stat_and_log_list(slave.offers(), 'decline_for_shutdown',
                                         lambda offer: "Shutting down, declining offer: %s" % offer.offer.id)
                 self._decline_list(driver, slave.offers())
+            self._cached_slaves = {}
 
     def registered(self, driver, frameworkId, masterInfo):
         """
@@ -365,11 +366,17 @@ class ChangesScheduler(Scheduler):
         logging.info("Re-Registered with new master")
 
     def disconnected(self, driver):
+        # type: (SchedulerDriver) -> None
         """
           Invoked when the scheduler becomes disconnected from the master, e.g.
           the master fails and another is taking over.
+          Abandon all open offers and slaves. We don't decline, since there's
+          no master to report to. The new master should provide a new batch of
+          offers soon enough.
         """
-        logging.info("Disconnected from master")
+        logging.info("Disconnected from master. Abandoning all cached offer and slave info without declining.")
+        with self._cached_slaves_lock:
+            self._cached_slaves = {}
 
     @staticmethod
     def _decode_typed_field(pb):
