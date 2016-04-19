@@ -512,7 +512,6 @@ class ChangesScheduler(Scheduler):
 
                 is_maintenanced = now_nanos > start_time and now_nanos < end_time
                 if is_maintenanced:
-                    logging.info("%s is maintenanced", self.hostname)
                     break
             return is_maintenanced
 
@@ -1095,3 +1094,107 @@ class ChangesScheduler(Scheduler):
 
         logging.info('Restored state for framework %s with %d running tasks from %s',
                      self.framework_id, len(self.taskJobStepMapping), self.state_file)
+
+    def state_json(self):
+        # type: () -> str
+        """Produce a JSON dump of the scheduler's internal state.
+        Returns:
+            A JSON-encoded dict representing the scheduler's state.
+        """
+        def convert_attrs(attrs):
+            # type: (List[Any]) -> List[Dict[str, Any]]
+            """Convert Attribute and Resource protobuf fields to dictionaries.
+            Args:
+                attrs: List of mesos_pb2.Attribute or mesos_pb2.Resource
+            Returns:
+                {'name': str, 'type': int, 'value': any simple Python type}
+            """
+            accum = []
+            for attr in attrs:
+                if attr.type == mesos_pb2.Value.SCALAR:
+                    value = attr.scalar.value
+                elif attr.type == mesos_pb2.Value.RANGES:
+                    value = attr.ranges.value
+                elif attr.type == mesos_pb2.Value.SET:
+                    value = attr.set.value
+                elif attr.type == mesos_pb2.Value.TEXT:
+                    value = attr.text.value
+                else:
+                    value = 'Unknown Mesos value type {} on slave {} offer {}'.format(
+                            attr.type, slave.hostname, offer.offer.id.value)
+
+                attr_output = {
+                    'name': attr.name,
+                    'type': attr.type,
+                    'value': value,
+                }
+                accum.append(attr_output)
+            return accum
+
+        start_time = time.time()
+        with self._cached_slaves_lock:
+            # Build JSON output for the blacklist.
+            blacklist_output = {
+                'path': self._blacklist._path,
+                'entries': sorted(list(self._blacklist._blacklist)),
+            }
+
+            # Build JSON output for all slaves.
+            slaves = self._cached_slaves.values()
+            slaves.sort(key=lambda x: x.hostname)
+            slaves_output = []
+            for slave in slaves:
+                # Build JSON output for all offers on the slave.
+                offers = slave._offers.values()
+                offers.sort(key=lambda x: x.offer.id.value)
+                offers_output = []
+                for offer in offers:
+                    if offer.offer.url.address.hostname:
+                        base = offer.offer.url.address.hostname
+                    else:
+                        base = offer.offer.url.address.ip
+                    url = (offer.offer.url.scheme +
+                           base +
+                           offer.offer.url.path +
+                           '&'.join(offer.offer.url.query) +
+                           offer.offer.url.fragment)
+
+                    offer_output = {
+                        'offer_id': offer.offer.id.value,
+                        'framework_id': offer.offer.framework_id.value,
+                        'url': url,
+                        'cpu': offer.cpu,
+                        'mem': offer.mem,
+                        'attributes': convert_attrs(offer.offer.attributes),
+                        'resources': convert_attrs(offer.offer.resources),
+                    }
+                    json.dumps(offer_output)
+                    offers_output.append(offer_output)
+                slave_output = {
+                        'slave_id': slave.slave_id,
+                        'hostname': slave.hostname,
+                        'cluster': slave.cluster,
+                        'offers': offers_output,
+                        'total_cpu': slave.total_cpu,
+                        'total_mem': slave.total_mem,
+                        'is_maintenanced': slave.is_maintenanced(
+                            int(start_time * 1000000000)),
+                }
+                json.dumps(slave_output)
+                slaves_output.append(slave_output)
+
+        # Put it all together.
+        state = {
+            'framework_id': self.framework_id,
+            'taskJobStepMapping': self.taskJobStepMapping,
+            'tasksLaunched': self.tasksLaunched,
+            'tasksFinished': self.tasksFinished,
+            'shuttingDown': self.shuttingDown.is_set(),
+            'blacklist': blacklist_output,
+            'snapshot_slave_map': self._snapshot_slave_map,
+            'changes_request_limit': self.changes_request_limit,
+            'cached_slaves': slaves_output,
+            'build_state_json_secs': time.time() - start_time,
+        }
+
+        return json.dumps(state)

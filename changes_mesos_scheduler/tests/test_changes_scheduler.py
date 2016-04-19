@@ -1048,3 +1048,228 @@ class ChangesSchedulerTest(TestCase):
             assert f.found_error
         finally:
             logger.removeFilter(f)
+
+    def test_state_json(self):
+        framework_id = 'frameworkid'
+        changes_request_limit = 53
+
+        blpath = self.test_dir + '/blacklist'
+        blacklist = open(blpath, 'w+')
+        blacklist.write('hostname1\nhostname2\n')
+        blacklist.close()
+
+        api = mock.Mock(spec=ChangesAPI)
+        cs = ChangesScheduler(state_file=None,
+                              api=api,
+                              blacklist=FileBlacklist(blpath),
+                              changes_request_limit=changes_request_limit)
+        cs.framework_id = framework_id
+        driver = mock.Mock()
+        now = time.time()
+
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=1, mem=1024)
+        offer2 = self._make_offer(id='offer2', hostname='host1', cpus=2, mem=2048)
+        offer3 = self._make_offer(id='offer3', hostname='host3', cpus=4, mem=4096,
+                                  cluster='some_cluster')
+        offer4 = self._make_offer(hostname='host4',
+                                  id='offer4',
+                                  cpus=5,
+                                  mem=5000,
+                                  unavailability_start_secs=now - 5,
+                                  unavailability_duration_secs=100)
+        cs.resourceOffers(driver, [offer1, offer2, offer3, offer4])
+
+        expected_state = {
+            'framework_id': framework_id,
+            'taskJobStepMapping': {},
+            'tasksLaunched': 0,
+            'tasksFinished': 0,
+            'shuttingDown': False,
+            'blacklist': {
+                'path': blpath,
+                'entries': [
+                    'hostname1',
+                    'hostname2',
+                ],
+            },
+            'snapshot_slave_map': {},
+            'changes_request_limit': changes_request_limit,
+            'cached_slaves': [
+                {
+                    'slave_id': 'slave_id_host1',
+                    'hostname': 'host1',
+                    'cluster': None,
+                    'offers': [
+                        {
+                            'offer_id': 'offer1',
+                            'framework_id': framework_id,
+                            'url': '',
+                            'cpu': 1.0,
+                            'mem': 1024,
+                            'attributes': [],
+                            'resources': [
+                                {'name': 'cpus', 'type': mesos_pb2.Value.SCALAR, 'value': 1},
+                                {'name': 'mem', 'type': mesos_pb2.Value.SCALAR, 'value': 1024},
+                            ],
+                        },
+                        {
+                            'offer_id': 'offer2',
+                            'framework_id': framework_id,
+                            'url': '',
+                            'cpu': 2.0,
+                            'mem': 2048,
+                            'attributes': [],
+                            'resources': [
+                                {'name': 'cpus', 'type': mesos_pb2.Value.SCALAR, 'value': 2},
+                                {'name': 'mem', 'type': mesos_pb2.Value.SCALAR, 'value': 2048},
+                            ],
+                        },
+                    ],
+                    'total_cpu': 3.0,
+                    'total_mem': 3072,
+                    'is_maintenanced': False,
+                },
+                {
+                    'slave_id': 'slave_id_host3',
+                    'hostname': 'host3',
+                    'cluster': 'some_cluster',
+                    'offers': [
+                        {
+                            'offer_id': 'offer3',
+                            'framework_id': framework_id,
+                            'url': '',
+                            'cpu': 4.0,
+                            'mem': 4096,
+                            'attributes': [
+                                {'name': 'labels', 'type': mesos_pb2.Value.TEXT, 'value': 'some_cluster'},
+                            ],
+                            'resources': [
+                                {'name': 'cpus', 'type': mesos_pb2.Value.SCALAR, 'value': 4},
+                                {'name': 'mem', 'type': mesos_pb2.Value.SCALAR, 'value': 4096},
+                            ],
+                        },
+                    ],
+                    'total_cpu': 4.0,
+                    'total_mem': 4096,
+                    'is_maintenanced': False,
+                },
+                {
+                    'slave_id': 'slave_id_host4',
+                    'hostname': 'host4',
+                    'cluster': None,
+                    'offers': [
+                        {
+                            'offer_id': 'offer4',
+                            'framework_id': framework_id,
+                            'url': '',
+                            'cpu': 5.0,
+                            'mem': 5000,
+                            'attributes': [],
+                            'resources': [
+                                {'name': 'cpus', 'type': mesos_pb2.Value.SCALAR, 'value': 5},
+                                {'name': 'mem', 'type': mesos_pb2.Value.SCALAR, 'value': 5000},
+                            ],
+                        },
+                    ],
+                    'total_cpu': 5.0,
+                    'total_mem': 5000,
+                    'is_maintenanced': True,
+                },
+            ],
+            'build_state_json_secs': .5,
+        }
+
+        state_json = cs.state_json()
+        state = json.loads(state_json)
+
+        # Verify that we got a time-to-build with approximately the right order
+        # of magnitude, then replace the value with something predictable.
+        assert state['build_state_json_secs'] > 0
+        assert state['build_state_json_secs'] < 10
+        state['build_state_json_secs'] = expected_state['build_state_json_secs']
+
+        # Verify a bunch of state fields individually to make diffing easier
+        # when we find a problem
+        for slave, expected_slave in (zip(state['cached_slaves'],
+                                          expected_state['cached_slaves'])):
+            for offer, expected_offer in zip(slave['offers'], expected_slave['offers']):
+                assert offer == expected_offer
+
+        # Compare all state keys individually.
+        for key in expected_state:
+            print 'Compare key {}: [{}] vs expected [{}]'.format(
+                key, state[key], expected_state[key])
+            assert state[key] == expected_state[key]
+
+        # Ensure both dicts have the same number of keys, which means the
+        # previous loop hit everything.
+        assert sorted(expected_state.keys()) == sorted(state.keys())
+
+        # Add some tasks to the scheduler and reschedule, to trigger some
+        # snapshot-slave mappings.
+        tasks = [
+            self._make_changes_task('1', mem=3072, snapshot='snap1'),
+            self._make_changes_task('2', mem=4096, snapshot='snap2'),
+        ]
+        api.get_allocate_jobsteps.return_value = tasks
+        api.post_allocate_jobsteps.return_value = ['1', '2']
+
+        assert api.get_allocate_jobsteps.reset()
+        assert api.post_allocate_jobsteps.reset()
+        assert not cs.poll_and_launch_once(driver)  # Get jobsteps and launch them.
+        assert api.get_allocate_jobsteps.call_count == 2
+        assert api.post_allocate_jobsteps.call_count == 2
+
+        state_json = cs.state_json()
+        state = json.loads(state_json)
+        assert len(state['snapshot_slave_map']) == 2
+
+    def test_state_json_performance(self):
+        """Verify that the /state_json handler can build its JSON payload in
+        less than .05 seconds, on average.
+        """
+        framework_id = 'frameworkid'
+        changes_request_limit = 53
+
+        blpath = self.test_dir + '/blacklist'
+        blacklist = open(blpath, 'w+')
+        blacklist.write('hostname1\nhostname2\n')
+        blacklist.close()
+
+        api = mock.Mock(spec=ChangesAPI)
+        cs = ChangesScheduler(state_file=None,
+                              api=api,
+                              blacklist=FileBlacklist(blpath),
+                              changes_request_limit=changes_request_limit)
+        cs.framework_id = framework_id
+        driver = mock.Mock()
+        now = time.time()
+
+        offer1 = self._make_offer(id='offer1', hostname='host1', cpus=1, mem=1024)
+        offer2 = self._make_offer(id='offer2', hostname='host1', cpus=2, mem=2048)
+        offer3 = self._make_offer(id='offer3', hostname='host3', cpus=4, mem=4096,
+                                  cluster='some_cluster')
+        offer4 = self._make_offer(hostname='host4',
+                                  id='offer4',
+                                  cpus=5,
+                                  mem=5000,
+                                  unavailability_start_secs=now - 5,
+                                  unavailability_duration_secs=100)
+        cs.resourceOffers(driver, [offer1, offer2, offer3, offer4])
+
+        tasks = [
+            self._make_changes_task('1', mem=3072, snapshot='snap1'),
+            self._make_changes_task('2', mem=4096, snapshot='snap2'),
+        ]
+        api.get_allocate_jobsteps.return_value = tasks
+        api.post_allocate_jobsteps.return_value = ['1', '2']
+        assert not cs.poll_and_launch_once(driver)
+
+        start_time = time.time()
+        loops = 1000
+        for i in xrange(loops):
+            state_json = cs.state_json()
+        total_time = time.time() - start_time
+
+        max_avg_time_per_loop = .05
+        assert total_time < max_avg_time_per_loop * loops

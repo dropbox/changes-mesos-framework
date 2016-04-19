@@ -11,6 +11,7 @@ import threading
 
 from time import sleep
 
+from flask import Flask
 from mesos.native import MesosSchedulerDriver
 from mesos.interface import mesos_pb2
 
@@ -40,7 +41,8 @@ def install_sentry_logger():
     setup_logging(handler)
 
 
-def run(api_url, mesos_master, user, config_dir, state_file, changes_request_limit, stats=None):
+def run(api_url, mesos_master, user, config_dir, state_file,
+        changes_request_limit, http_port, stats=None):
     scheduler = ChangesScheduler(state_file, api=ChangesAPI(api_url), stats=stats,
                                  blacklist=FileBlacklist(os.path.join(config_dir, 'blacklist')),
                                  changes_request_limit=changes_request_limit)
@@ -111,13 +113,26 @@ def run(api_url, mesos_master, user, config_dir, state_file, changes_request_lim
     driver.start()
     logging.info("Driver started")
 
-    scheduler.poll_changes_until_shutdown(driver, 5)
-    status = 0 if driver.join() == mesos_pb2.DRIVER_STOPPED else 1
+    app = Flask("Changes Mesos Scheduler")
+    app.add_url_rule('/api/state_json', 'state_json', scheduler.state_json) 
+    http_thread = threading.Thread(target=app.run, kwargs={'port':http_port})
+    http_thread.start()
 
-    # Ensure that the driver process terminates.
-    if status == 1:
+    scheduler.poll_changes_until_shutdown(driver, 5)
+    status = 0
+    if driver.join() == mesos_pb2.DRIVER_STOPPED:
+        logging.info("Driver stopped cleanly.")
+    else:
+        # Ensure that the driver process terminates.
+        status = 1
+        logging.info("Stopping driver forcibly.")
         driver.stop()
 
+    logging.info("Stopping HTTP server.")
+    http_thread.terminate()
+    http_thread.join()
+
+    logging.info("Clean shutdown complete. Exiting status %d.", status)
     sys.exit(status)
 
 
@@ -137,6 +152,7 @@ def main():
     parser.add_argument('--statsd-prefix', default='changes_scheduler', help='Prefix for stats keys')
     parser.add_argument('--changes-request-limit', default=200, type=int,
                         help='Maximum number of JobSteps to ask Changes for per-request')
+    parser.add_argument('--http_port', default=5888, type=int, help='Port for Flask to listen for and serve HTTP requests.')
 
     args = parser.parse_args(sys.argv[1:])
     logging.basicConfig(level=getattr(logging, args.log_level.upper()),
@@ -152,7 +168,8 @@ def main():
         }).stats()
 
     try:
-        run(args.api_url, args.mesos_master, args.user, args.config_dir, args.state_file, args.changes_request_limit, stats)
+        run(args.api_url, args.mesos_master, args.user, args.config_dir,
+            args.state_file, args.changes_request_limit, args.http_port, stats)
     except Exception as e:
         logging.exception(unicode(e))
         raise
