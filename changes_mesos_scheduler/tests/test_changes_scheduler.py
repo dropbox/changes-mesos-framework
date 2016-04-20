@@ -1077,6 +1077,18 @@ class ChangesSchedulerTest(TestCase):
                                   mem=5000,
                                   unavailability_start_secs=now - 5,
                                   unavailability_duration_secs=100)
+        offer4.attributes.add(name="ranges_example",
+                              type=mesos_pb2.Value.RANGES,
+                              ranges=mesos_pb2.Value.Ranges(range=[
+                                  mesos_pb2.Value.Range(begin=10, end=20),
+                                  mesos_pb2.Value.Range(begin=30, end=40),
+                              ]))
+        offer4.attributes.add(name="set_example",
+                              type=mesos_pb2.Value.SET,
+                              set=mesos_pb2.Value.Set(item=[
+                                  'string_1',
+                                  'string_2',
+                              ]))
         cs.resourceOffers(driver, [offer1, offer2, offer3, offer4])
 
         expected_state = {
@@ -1164,7 +1176,10 @@ class ChangesSchedulerTest(TestCase):
                             'url': '',
                             'cpu': 5.0,
                             'mem': 5000,
-                            'attributes': [],
+                            'attributes': [
+                                {'name': 'ranges_example', 'type': mesos_pb2.Value.RANGES, 'value': '(10, 20), (30, 40)'},
+                                {'name': 'set_example', 'type': mesos_pb2.Value.SET, 'value': 'string_1, string_2'},
+                            ],
                             'resources': [
                                 {'name': 'cpus', 'type': mesos_pb2.Value.SCALAR, 'value': 5},
                                 {'name': 'mem', 'type': mesos_pb2.Value.SCALAR, 'value': 5000},
@@ -1255,6 +1270,19 @@ class ChangesSchedulerTest(TestCase):
                                   mem=5000,
                                   unavailability_start_secs=now - 5,
                                   unavailability_duration_secs=100)
+        offer4.attributes.add(name="ranges_example",
+                              type=mesos_pb2.Value.RANGES,
+                              ranges=mesos_pb2.Value.Ranges(range=[
+                                  mesos_pb2.Value.Range(begin=10, end=20),
+                                  mesos_pb2.Value.Range(begin=30, end=40),
+                              ]))
+        offer4.attributes.add(name="set_example",
+                              type=mesos_pb2.Value.SET,
+                              set=mesos_pb2.Value.Set(item=[
+                                  'string_1',
+                                  'string_2',
+                              ]))
+                              
         cs.resourceOffers(driver, [offer1, offer2, offer3, offer4])
 
         tasks = [

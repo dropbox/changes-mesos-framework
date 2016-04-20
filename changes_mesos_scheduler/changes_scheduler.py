@@ -1114,9 +1114,9 @@ class ChangesScheduler(Scheduler):
                 if attr.type == mesos_pb2.Value.SCALAR:
                     value = attr.scalar.value
                 elif attr.type == mesos_pb2.Value.RANGES:
-                    value = attr.ranges.value
+                    value = ', '.join(map(lambda x: '(%d, %d)' % (x.begin, x.end), attr.ranges.range))
                 elif attr.type == mesos_pb2.Value.SET:
-                    value = attr.set.value
+                    value = ', '.join(attr.set.item)
                 elif attr.type == mesos_pb2.Value.TEXT:
                     value = attr.text.value
                 else:
