@@ -3,6 +3,7 @@
 from __future__ import absolute_import, print_function
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -39,6 +40,17 @@ def install_sentry_logger():
     client = raven.Client()
     handler = SentryHandler(client, level=logging.WARN)
     setup_logging(handler)
+
+
+def json_handler(func):
+    """Produce an HTTP handler which JSON-encodes a Python object and sets
+    the Content-Type to application/json."""
+    def wrapped_func():
+        """Returns
+            (str output content, int status code, dict headers (content type))
+        """
+        return json.dumps(func()), 200, {'Content-Type': 'application/json; charset=utf-8'}
+    return wrapped_func
 
 
 def run(api_url, mesos_master, user, config_dir, state_file,
@@ -114,7 +126,8 @@ def run(api_url, mesos_master, user, config_dir, state_file,
     logging.info("Driver started")
 
     app = Flask("Changes Mesos Scheduler")
-    app.add_url_rule('/api/state_json', 'state_json', scheduler.state_json) 
+    app.add_url_rule(
+        '/api/state_json', 'state_json', json_handler(scheduler.state_json) )
     http_thread = threading.Thread(target=app.run, kwargs={'port':http_port})
     http_thread.start()
 

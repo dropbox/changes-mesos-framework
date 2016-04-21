@@ -1194,8 +1194,10 @@ class ChangesSchedulerTest(TestCase):
             'build_state_json_secs': .5,
         }
 
-        state_json = cs.state_json()
-        state = json.loads(state_json)
+        state = cs.state_json()
+
+        # Verify that the state can be json-converted cleanly.
+        json.dumps(state)
 
         # Verify that we got a time-to-build with approximately the right order
         # of magnitude, then replace the value with something predictable.
@@ -1235,8 +1237,7 @@ class ChangesSchedulerTest(TestCase):
         assert api.get_allocate_jobsteps.call_count == 2
         assert api.post_allocate_jobsteps.call_count == 2
 
-        state_json = cs.state_json()
-        state = json.loads(state_json)
+        state = cs.state_json()
         assert len(state['snapshot_slave_map']) == 2
 
     def test_state_json_performance(self):

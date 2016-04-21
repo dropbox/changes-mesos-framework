@@ -1096,7 +1096,7 @@ class ChangesScheduler(Scheduler):
                      self.framework_id, len(self.taskJobStepMapping), self.state_file)
 
     def state_json(self):
-        # type: () -> str
+        # type: () -> Dict[str, Any]
         """Produce a JSON dump of the scheduler's internal state.
         Returns:
             A JSON-encoded dict representing the scheduler's state.
@@ -1197,4 +1197,4 @@ class ChangesScheduler(Scheduler):
             'build_state_json_secs': time.time() - start_time,
         }
 
-        return json.dumps(state)
+        return state
