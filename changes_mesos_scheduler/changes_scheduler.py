@@ -23,6 +23,8 @@ from google.protobuf import text_format as _text_format # type: ignore
 from mesos.interface import Scheduler, SchedulerDriver
 from mesos.interface import mesos_pb2
 
+# how long (in seconds) we'll continue trying to kill a task. After that we give up.
+TASK_KILL_THRESHOLD = 3600
 
 class FileBlacklist(object):
     """ File-backed blacklist for slave hostnames.
@@ -139,6 +141,21 @@ class ChangesAPI(object):
             data['cluster'] = cluster
         return self._api_request("/jobsteps/allocate/", data)['allocated']
 
+    def jobstep_needs_abort(self, jobstep_ids):
+        # type: (List[str]) -> List[str]
+        """ Query for which jobsteps in a given list should be aborted.
+
+        Args:
+            jobstep_ids: JobStep ID hexs we are asking about.
+        Returns:
+            list: subset of the jobstep_ids, which should be aborted.
+        """
+        # don't bother sending the request if there are no jobstep ids
+        if len(jobstep_ids) == 0:
+            return []
+        data = {'jobstep_ids': jobstep_ids}
+        return self._api_request("/jobsteps/needs_abort/", data)['needs_abort']
+
     def update_jobstep(self, jobstep_id, status, result=None, hostname=None):
         # type: (str, str, Optional[str], Optional[str]) -> None
         """ Update the recorded status and possibly result of a JobStep in Changes.
@@ -186,9 +203,12 @@ class ChangesScheduler(Scheduler):
         """
         self.framework_id = None # type: Optional[str]
         self._changes_api = api
+        self.taskJobStepMappingLock = threading.Lock()
         self.taskJobStepMapping = {} # type: Dict[str, str]
         # maps from a slave_id to general info about that slave (currently only its hostname)
         self.slaveIdInfo = {} # type: Dict[str, SlaveInfo]
+        # maps from a task id to a timestamp of when we first tried killing that task
+        self.tasksPendingKill = {} # type: Dict[str, float]
         self.tasksLaunched = 0
         self.tasksFinished = 0
         self.shuttingDown = Event()
@@ -256,6 +276,9 @@ class ChangesScheduler(Scheduler):
                 # Loop as long as Changes continues providing tasks to schedule.
                 while self.poll_and_launch_once(driver):
                     pass
+
+                # kill any aborted jobsteps too
+                self.poll_and_abort(driver)
 
                 # Schedule the delay for the next iteration of the loop,
                 # attempting to compensate for scheduling skew caused by
@@ -333,6 +356,37 @@ class ChangesScheduler(Scheduler):
         # comparing the number of jobsteps received vs. the number of jobsteps
         # requested.
         return len(jobsteps_by_cluster) == self.changes_request_limit
+
+    def poll_and_abort(self, driver):
+        # type: (SchedulerDriver) -> None
+        """Poll Changes to see if any jobsteps we're responsible for should be aborted. 
+        We ask the Mesos master to kill the tasks for these jobsteps.
+        """
+        jobStepTaskMapping = {}
+        with self.taskJobStepMappingLock:
+            for task_id, jobstep_id in self.taskJobStepMapping.iteritems():
+                jobStepTaskMapping[jobstep_id] = task_id
+        try:
+            abort_jobstep_ids = self._changes_api.jobstep_needs_abort(sorted(jobStepTaskMapping.keys()))
+        except APIError:
+            logging.warning('/jobstep/needs_abort/ failed', exc_info=True)
+            abort_jobstep_ids = []
+
+        now = time.time()
+        for jobstep_id in abort_jobstep_ids:
+            task_id = jobStepTaskMapping[jobstep_id]
+            with self.taskJobStepMappingLock:
+                # add it to tasksPendingKill if it's not already there.
+                first_tried_to_kill = self.tasksPendingKill.setdefault(task_id, now)
+                if now - first_tried_to_kill > TASK_KILL_THRESHOLD:
+                    # giving up on this one
+                    logging.warning("Task %s (jobstep ID %s) still hasn't been successfully killed, giving up.", task_id, jobstep_id)
+                    self._stats.incr('couldnt_abort_task')
+                    del self.taskJobStepMapping[task_id]
+                    del self.tasksPendingKill[task_id]
+                    continue
+            logging.info('Asking Mesos to kill task %s (jobstep ID %s)', task_id, jobstep_id)
+            driver.killTask(task_id)
 
     def decline_open_offers(self, driver):
         # type: (SchedulerDriver) -> None
@@ -868,8 +922,9 @@ class ChangesScheduler(Scheduler):
             offers_to_launch = slave.offers_to_launch()
             tasks_to_launch, jobstep_ids = slave.tasks_to_launch()
 
-            for task, jobstep_id in zip(tasks_to_launch, jobstep_ids):
-                self.taskJobStepMapping[task.task_id.value] = jobstep_id
+            with self.taskJobStepMappingLock:
+                for task, jobstep_id in zip(tasks_to_launch, jobstep_ids):
+                    self.taskJobStepMapping[task.task_id.value] = jobstep_id
 
             self.tasksLaunched += len(tasks_to_launch)
             logging.info("Launch tasks: {} offers,  {} tasks".format(len(offers_to_launch), len(tasks_to_launch)))
@@ -965,15 +1020,21 @@ class ChangesScheduler(Scheduler):
             5: "lost",  # terminal
             6: "staging",
         }
+        terminal_states = ["finished", "failed", "killed", "lost"]
 
         state = states[status.state]
         logging.info("Task %s is in state %d", status.task_id.value, status.state)
 
-        jobstep_id = self.taskJobStepMapping.get(status.task_id.value)
-
         if status.state == mesos_pb2.TASK_FINISHED:
             self.tasksFinished += 1
-            self.taskJobStepMapping.pop(status.task_id.value, None)
+
+        with self.taskJobStepMappingLock:
+            jobstep_id = self.taskJobStepMapping.get(status.task_id.value)
+
+            if state in terminal_states:
+                self.taskJobStepMapping.pop(status.task_id.value, None)
+                if status.task_id.value in self.tasksPendingKill:
+                    del self.tasksPendingKill[status.task_id.value]
 
         hostname = None
         if self.slaveIdInfo.get(status.slave_id.value):
@@ -1059,6 +1120,7 @@ class ChangesScheduler(Scheduler):
         state = {}
         state['framework_id'] = self.framework_id
         state['taskJobStepMapping'] = self.taskJobStepMapping
+        state['tasksPendingKill'] = self.tasksPendingKill
         state['slaveIdInfo'] = {}
         for slave, info in self.slaveIdInfo.iteritems():
             state['slaveIdInfo'][slave] = {'hostname': info.hostname}
@@ -1081,6 +1143,7 @@ class ChangesScheduler(Scheduler):
 
         self.framework_id = state['framework_id']
         self.taskJobStepMapping = state['taskJobStepMapping']
+        self.tasksPendingKill = state.get('tasksPendingKill', {})
         self.slaveIdInfo = {}
         for slave, info in state.get('slaveIdInfo', {}).iteritems():
             self.slaveIdInfo[slave] = SlaveInfo(hostname=info.get('hostname'))
@@ -1187,6 +1250,7 @@ class ChangesScheduler(Scheduler):
         state = {
             'framework_id': self.framework_id,
             'taskJobStepMapping': self.taskJobStepMapping,
+            'tasksPendingKill': self.tasksPendingKill,
             'tasksLaunched': self.tasksLaunched,
             'tasksFinished': self.tasksFinished,
             'shuttingDown': self.shuttingDown.is_set(),

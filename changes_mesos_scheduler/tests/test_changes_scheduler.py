@@ -19,7 +19,7 @@ logger.level = logging.DEBUG
 from mesos.interface import mesos_pb2
 from mesos.interface import Scheduler
 
-from changes_mesos_scheduler.changes_scheduler import ChangesScheduler, APIError, FileBlacklist, ChangesAPI, SlaveInfo
+from changes_mesos_scheduler.changes_scheduler import ChangesScheduler, APIError, FileBlacklist, ChangesAPI, SlaveInfo, TASK_KILL_THRESHOLD
 from changes_mesos_scheduler import statsreporter
 
 def _noop_blacklist():
@@ -135,6 +135,7 @@ class ChangesSchedulerTest(TestCase):
         cs.tasksLaunched = 5
         cs.tasksFinished = 3
         cs.taskJobStepMapping['task x'] = 'jobstep x'
+        cs.tasksPendingKill = {'task y': 100.5}
         cs.slaveIdInfo['slaveid'] = SlaveInfo(hostname='aHostname')
         cs._snapshot_slave_map = defaultdict(lambda: defaultdict(float))
         cs._snapshot_slave_map['snapid']['host1'] = 1234567.0
@@ -147,6 +148,7 @@ class ChangesSchedulerTest(TestCase):
         assert 5 == cs2.tasksLaunched
         assert 3 == cs2.tasksFinished
         assert {'task x': 'jobstep x'} == cs2.taskJobStepMapping
+        assert {'task y': 100.5} == cs2.tasksPendingKill
         assert cs2.slaveIdInfo['slaveid'].hostname == 'aHostname'
         assert not os.path.exists(state_file)
         assert {'snapid': {'host1': 1234567.0, 'host2': 1234569.0}} == cs2._snapshot_slave_map
@@ -154,6 +156,9 @@ class ChangesSchedulerTest(TestCase):
     def test_save_restore_state_missing(self):
         state_file = self.test_dir + '/test.json'
 
+        # newly added fields shouldn't be added to this dict. This is so we 
+        # can test that newly added (aka initially missing) fields are 
+        # restored to a reasonable default.
         state = {'framework_id': 1,
                  'tasksLaunched': 5,
                  'tasksFinished': 3,
@@ -169,8 +174,7 @@ class ChangesSchedulerTest(TestCase):
         assert 5 == cs2.tasksLaunched
         assert 3 == cs2.tasksFinished
         assert {'task x': 'jobstep x'} == cs2.taskJobStepMapping
-        # when the scheduler is first updated to have slaveIdInfo, state.json
-        # won't have anything about slaveIdInfo; test that it works anyway
+        assert cs2.tasksPendingKill == {}
         assert cs2.slaveIdInfo == {}
         assert not os.path.exists(state_file)
         assert {} == cs2._snapshot_slave_map
@@ -197,6 +201,7 @@ class ChangesSchedulerTest(TestCase):
         cs = ChangesScheduler(state_file=None, api=api,
                               blacklist=_noop_blacklist())
         cs.taskJobStepMapping = {'taskid': '1'}
+        cs.tasksPendingKill = {'taskid': 1000.0}
         cs.slaveIdInfo = {'slaveid': SlaveInfo(hostname='aHostname')}
         driver = mock.Mock()
 
@@ -205,10 +210,28 @@ class ChangesSchedulerTest(TestCase):
         cs.statusUpdate(driver, status)
 
         assert cs.tasksFinished == 0
-        assert len(cs.taskJobStepMapping) == 1
+        assert len(cs.taskJobStepMapping) == 0
+        assert len(cs.tasksPendingKill) == 0
 
         assert api.jobstep_console_append.call_count == 1
         api.update_jobstep.assert_called_once_with('1', status='finished', result='infra_failed', hostname='aHostname')
+
+    def test_task_running(self):
+        api = mock.Mock(spec=ChangesAPI)
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        cs.taskJobStepMapping = {'taskid': '1'}
+        driver = mock.Mock()
+
+        status = self._make_task_status(id='taskid', jobstep_id='1', state=mesos_pb2.TASK_RUNNING)
+
+        cs.statusUpdate(driver, status)
+
+        assert cs.tasksFinished == 0
+        assert len(cs.taskJobStepMapping) == 1
+
+        api.jobstep_console_append.assert_not_called()
+        api.update_jobstep.assert_not_called()
 
     def test_missing_jobstep_mapping(self):
         api = mock.Mock(spec=ChangesAPI)
@@ -241,6 +264,75 @@ class ChangesSchedulerTest(TestCase):
         assert len(cs.taskJobStepMapping) == 0
 
         api.update_jobstep.assert_called_once_with('1', status='finished', hostname=None)
+
+    def test_needs_abort_api_error(self):
+        api = mock.Mock(spec=ChangesAPI)
+        api.jobstep_needs_abort.side_effect = APIError("Failure")
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        cs.taskJobStepMapping = {'task1': '1'}
+        driver = mock.Mock()
+
+        cs.poll_and_abort(driver)
+
+        api.jobstep_needs_abort.assert_called_once_with(['1'])
+        assert driver.killTask.call_count == 0
+
+    def test_no_needs_abort(self):
+        api = mock.Mock(spec=ChangesAPI)
+        api.jobstep_needs_abort.return_value = []
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        cs.taskJobStepMapping = {'task1': '1'}
+        driver = mock.Mock()
+
+        cs.poll_and_abort(driver)
+
+        api.jobstep_needs_abort.assert_called_once_with(['1'])
+        assert driver.killTask.call_count == 0
+
+    def test_jobsteps_needs_abort(self):
+        api = mock.Mock(spec=ChangesAPI)
+        api.jobstep_needs_abort.return_value = ['1', '2']
+        cs = ChangesScheduler(state_file=None, api=api,
+                              blacklist=_noop_blacklist())
+        cs.taskJobStepMapping = {'task1': '1', 'task2': '2', 'task3': '3'}
+        driver = mock.Mock()
+
+        with mock.patch('time.time') as t:
+            t.return_value = 1000.0
+            cs.poll_and_abort(driver)
+
+        api.jobstep_needs_abort.assert_called_once_with(['1', '2', '3'])
+        
+        driver.killTask.assert_any_call('task1')
+        driver.killTask.assert_any_call('task2')
+        # task3 isn't marked aborted by Changes so we don't abort it
+        assert driver.killTask.call_count == 2
+        assert cs.tasksPendingKill == {'task1': 1000, 'task2': 1000}
+
+    def test_aborted_task_wont_die(self):
+        api = mock.Mock(spec=ChangesAPI)
+        api.jobstep_needs_abort.return_value = ['1', '2']
+        stats = mock.Mock()
+        cs = ChangesScheduler(state_file=None, api=api, stats=stats,
+                              blacklist=_noop_blacklist())
+        cs.taskJobStepMapping = {'task1': '1', 'task2': '2', 'task3': '3'}
+        task2_time = 1000.0 + TASK_KILL_THRESHOLD + 1
+        cs.tasksPendingKill = {'task1': 1000.0, 'task2': task2_time}
+        driver = mock.Mock()
+
+        with mock.patch('time.time') as t:
+            t.return_value = task2_time + 1
+            cs.poll_and_abort(driver)
+
+        api.jobstep_needs_abort.assert_called_once_with(['1', '2', '3'])
+
+        driver.killTask.assert_any_call('task2')
+        assert driver.killTask.call_count == 1
+        assert cs.taskJobStepMapping == {'task2': '2', 'task3': '3'}
+        assert cs.tasksPendingKill == {'task2': task2_time}
+        stats.incr.assert_called_once_with('couldnt_abort_task')
 
     def test_blacklist(self):
         blpath = self.test_dir + '/blacklist'
@@ -1094,6 +1186,7 @@ class ChangesSchedulerTest(TestCase):
         expected_state = {
             'framework_id': framework_id,
             'taskJobStepMapping': {},
+            'tasksPendingKill': {},
             'tasksLaunched': 0,
             'tasksFinished': 0,
             'shuttingDown': False,
