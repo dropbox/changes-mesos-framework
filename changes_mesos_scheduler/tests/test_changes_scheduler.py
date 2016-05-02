@@ -201,7 +201,6 @@ class ChangesSchedulerTest(TestCase):
         cs = ChangesScheduler(state_file=None, api=api,
                               blacklist=_noop_blacklist())
         cs.taskJobStepMapping = {'taskid': '1'}
-        cs.tasksPendingKill = {'taskid': 1000.0}
         cs.slaveIdInfo = {'slaveid': SlaveInfo(hostname='aHostname')}
         driver = mock.Mock()
 
@@ -211,7 +210,6 @@ class ChangesSchedulerTest(TestCase):
 
         assert cs.tasksFinished == 0
         assert len(cs.taskJobStepMapping) == 0
-        assert len(cs.tasksPendingKill) == 0
 
         assert api.jobstep_console_append.call_count == 1
         api.update_jobstep.assert_called_once_with('1', status='finished', result='infra_failed', hostname='aHostname')
@@ -298,16 +296,17 @@ class ChangesSchedulerTest(TestCase):
                               blacklist=_noop_blacklist())
         cs.taskJobStepMapping = {'task1': '1', 'task2': '2', 'task3': '3'}
         driver = mock.Mock()
+        killed_tasks = []
+        driver.killTask.side_effect = lambda task: killed_tasks.append(task.value)
 
         with mock.patch('time.time') as t:
             t.return_value = 1000.0
             cs.poll_and_abort(driver)
 
         api.jobstep_needs_abort.assert_called_once_with(['1', '2', '3'])
-        
-        driver.killTask.assert_any_call('task1')
-        driver.killTask.assert_any_call('task2')
+
         # task3 isn't marked aborted by Changes so we don't abort it
+        assert sorted(killed_tasks) == ['task1', 'task2']
         assert driver.killTask.call_count == 2
         assert cs.tasksPendingKill == {'task1': 1000, 'task2': 1000}
 
@@ -321,6 +320,8 @@ class ChangesSchedulerTest(TestCase):
         task2_time = 1000.0 + TASK_KILL_THRESHOLD + 1
         cs.tasksPendingKill = {'task1': 1000.0, 'task2': task2_time}
         driver = mock.Mock()
+        killed_tasks = []
+        driver.killTask.side_effect = lambda task: killed_tasks.append(task.value)
 
         with mock.patch('time.time') as t:
             t.return_value = task2_time + 1
@@ -328,7 +329,7 @@ class ChangesSchedulerTest(TestCase):
 
         api.jobstep_needs_abort.assert_called_once_with(['1', '2', '3'])
 
-        driver.killTask.assert_any_call('task2')
+        assert sorted(killed_tasks) == ['task2']
         assert driver.killTask.call_count == 1
         assert cs.taskJobStepMapping == {'task2': '2', 'task3': '3'}
         assert cs.tasksPendingKill == {'task2': task2_time}

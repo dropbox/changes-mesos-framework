@@ -386,7 +386,7 @@ class ChangesScheduler(Scheduler):
                     del self.tasksPendingKill[task_id]
                     continue
             logging.info('Asking Mesos to kill task %s (jobstep ID %s)', task_id, jobstep_id)
-            driver.killTask(task_id)
+            driver.killTask(mesos_pb2.TaskID(value=task_id))
 
     def decline_open_offers(self, driver):
         # type: (SchedulerDriver) -> None
@@ -1028,13 +1028,19 @@ class ChangesScheduler(Scheduler):
         if status.state == mesos_pb2.TASK_FINISHED:
             self.tasksFinished += 1
 
+        aborted = False
         with self.taskJobStepMappingLock:
             jobstep_id = self.taskJobStepMapping.get(status.task_id.value)
 
             if state in terminal_states:
                 self.taskJobStepMapping.pop(status.task_id.value, None)
                 if status.task_id.value in self.tasksPendingKill:
+                    kill_time = self.tasksPendingKill[status.task_id.value]
                     del self.tasksPendingKill[status.task_id.value]
+                    aborted = True
+                    elapsed = time.time() - kill_time
+                    logging.info('Successfully aborted task %s (jobstep ID %s) after %.2f seconds', status.task_id.value, jobstep_id, elapsed)
+                    self._stats.incr('task_aborted')
 
         hostname = None
         if self.slaveIdInfo.get(status.slave_id.value):
@@ -1055,7 +1061,7 @@ class ChangesScheduler(Scheduler):
                 self._changes_api.update_jobstep(jobstep_id, status="finished", hostname=hostname)
             except APIError:
                 pass
-        elif state in ('killed', 'lost', 'failed'):
+        elif state in ('killed', 'lost', 'failed') and not aborted:
             self._stats.incr('task_' + state)
             # Jobsteps are only intended to be executed once and should only exit non-zero or be
             # lost/killed by infrastructural issues, so we don't attempt to reschedule, and we mark
